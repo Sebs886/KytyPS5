@@ -11,23 +11,25 @@
 // emulator never opened it, so the guest's vibration port (AUDIO_OUT_PORT_TYPE_VIBRATION) went
 // nowhere and the pad never vibrated.
 //
-// This is the Windows implementation (WASAPI, through the endpoint the pad's USB ID names). The
-// endpoint cannot be picked by name: Windows calls the pad's endpoint and the machine's speakers
-// both "Speakers"/"扬声器" (see the notes). Linux keeps using SDL's device list.
+// This is the SDL2 backend: the endpoint is found through SDL's device list (matched by name, and
+// required to be quad-channel) and written with SDL_QueueAudio. Upstream's own WASAPI backend
+// opens the endpoint through IAudioClient instead; this one keeps the SDL path the addon package
+// has always used, which is the one that is silent on the host's main output. The API below is
+// upstream's, so libs/audio.cpp needs no change.
 //
-// Environment and dualsense-haptics.txt (the file wins; both optional):
-//   KYTY_DUALSENSE_HAPTICS=0|1     off when 0 (default: on)
-//   KYTY_DUALSENSE_HAPTICS_CHANNELS=23|01|all   which of the endpoint's channels take the vibration
-//                                  (default: 23, the actuator pair)
-//   KYTY_DUALSENSE_HAPTICS_GAIN=<float>         applied to the vibration samples (default: 1.0)
-//   KYTY_DUALSENSE_SPEAKER_CHANNELS=01|23|all   the same for the pad speaker (default: 01)
-//   KYTY_DUALSENSE_SPEAKER_GAIN=<float>         0..64 (default: 8.0, +18 dB). What the guest sends
-//                                  to a pad speaker port is quiet - Demon's Souls peaks at about
-//                                  -40 dB - and the controller's own amplifier then buries it in
-//                                  its noise floor, so the digital gain is what makes it clear.
-//                                  8 is clear, 16 borderline, 32 clips (4.0 is what
-//                                  github.com/Jetsku/KytyPS5's launcher gives at 200%).
-//   KYTY_DUALSENSE_HAPTICS_LOG=1   prints what it finds and what it writes (default: off)
+// Both routes of one batch are collected into a SINGLE quad block before it is queued: the pad
+// speaker port and the vibration port arrive as two calls, and queueing each one on its own leaves
+// the other's channel pair zero for that stretch, which is heard as a chopped, buzzing speaker.
+//
+// Environment (optional):
+//   KYTY_DUALSENSE_HAPTICS=0|1          off when 0 (default: on)
+//   KYTY_DUALSENSE_HAPTICS_LOG=1        prints what it finds and what it writes (default: off)
+//   KYTY_DUALSENSE_SPEAKER_GAIN=<float> 0..64, level of the pad speaker route (default: 8.0).
+//                                       What the guest sends to a pad speaker port is quiet --
+//                                       Demon's Souls peaks at about -40 dB -- and the pad's own
+//                                       amplifier then buries it in its noise floor, so the digital
+//                                       gain is what makes it clear. Upstream's own default.
+//   KYTY_DUALSENSE_HAPTICS_GAIN=<float> 0..4, the same for the actuator route (default: 1.0)
 namespace Libs::Controller::DualSenseHaptics {
 
 // True when the host has a usable DualSense output endpoint (found once, then cached).
@@ -39,8 +41,7 @@ uint32_t EndpointChannels();
 
 // Opens the endpoint for one of its routes: the pad speaker port plays on the endpoint's FIRST
 // channel pair, the vibration port on its second (the actuators). Several routes share the one
-// stream, and it stays open while any route is. False when there is no endpoint, when it cannot
-// take the format, or when that route is already open: the caller then leaves the port as it was.
+// stream, and it stays open while any route is. False when there is no endpoint.
 bool Open(bool speaker);
 // Closes the route, and tears the stream down once no route is left.
 void Close(bool speaker);

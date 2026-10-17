@@ -1,633 +1,605 @@
+// DualSense controller audio: the pad speaker and the haptic actuators get their own audio, sent to
+// the DualSense's USB audio endpoint (four channels: front pair headphones/speaker, back pair the
+// actuators). The PS5 API exposes them as AUDIO_OUT_PORT_TYPE_PADSPK and AUDIO_OUT_PORT_TYPE_VIBRATION
+// ports; in games such as Demon's Souls the vibration port carries the high fidelity haptics.
+//
+// This is the SDL2 port of the upstream KytyPS5 / U59 backend, kept behind upstream's own
+// dualSenseHaptics API so libs/audio.cpp and libs/controller.cpp need no change. Only the wired path
+// is implemented: a Bluetooth DualSense has no audio endpoint SDL can write haptics to (upstream
+// encodes them to Opus and sends them over the HID link), so wireless pads keep SDL's rumble path.
+
 #include "libs/dualSenseHaptics.h"
 
 #include "SDL.h"
 #include "common/logging/log.h"
+#include "common/threads.h"
 
-#if defined(_WIN32)
-
+#include <algorithm>
 #include <array>
-#include <cstdio>
+#include <atomic>
+#include <cctype>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
-#include <mutex>
-
-#define WIN32_LEAN_AND_MEAN
-#include <audioclient.h>
-#include <mmdeviceapi.h>
-#include <windows.h>
+#include <string>
+#include <vector>
 
 namespace Libs::Controller::DualSenseHaptics {
 
 namespace {
 
-// PKEY_DeviceInterface_FriendlyName: the device's own name, "USB\VID_054C&PID_0CE6&MI_00" for the
-// pad's audio interface. The endpoint's own name (PKEY_Device_FriendlyName) is just "Speakers".
-constexpr PROPERTYKEY PKEY_INTERFACE_FRIENDLY_NAME = {
-    {0xb3f8fa53, 0x0004, 0x438e, {0x90, 0x03, 0x51, 0xa4, 0x6e, 0x13, 0x9b, 0xfc}}, 2};
+constexpr int      FRAME_BYTES     = 4 * sizeof(float); // one quad frame, scaled to float
+constexpr uint32_t OUTPUT_CHANNELS = 4;
+// The queued audio the endpoint may hold ahead of real time. Upstream initializes a 100 ms stream,
+// so the same amount is kept here; beyond it a block is dropped (see FlushPendingLocked).
+constexpr uint32_t MAX_QUEUE_MS    = 100;
+constexpr int      RECHECK_MS      = 2000;
 
-// The pad's USB interface path, as both the audio driver and the registry report it.
-constexpr const char* PAD_DEVICE_PATH = "VID_054C&PID_0CE6";
-
-// The endpoint's four channels: 0-1 play on the pad's speaker, 2-3 drive its haptic actuators.
-constexpr uint32_t SPEAKER_FIRST_CHANNEL = 0;
-constexpr uint32_t SPEAKER_CHANNELS      = 2;
+// Sony's vendor id and the DualSense / DualSense Edge product ids.
+constexpr uint16_t SONY_VENDOR        = 0x054c;
+constexpr uint16_t DUALSENSE_PID      = 0x0ce6;
+constexpr uint16_t DUALSENSE_EDGE_PID = 0x0df2;
 
 constexpr uint32_t ROUTE_SPEAKER   = 1U << 0U;
 constexpr uint32_t ROUTE_VIBRATION = 1U << 1U;
 
-IMMDevice*          g_device        = nullptr;
-IAudioClient*       g_client        = nullptr;
-IAudioRenderClient* g_render        = nullptr;
-WAVEFORMATEX*       g_mix           = nullptr;
-uint32_t            g_buffer_frames = 0;
-uint32_t            g_routes        = 0;
+// One mutex covers everything below, and nothing here calls back into Audio or Controller while it
+// is held, so the lock order with libAudio's own mutex (held by our caller) cannot invert.
+Common::Mutex      g_mutex;
+uint32_t           g_routes      = 0;
+SDL_AudioDeviceID  g_device      = 0;
+uint32_t           g_device_freq = 0; // the rate the endpoint took
+uint32_t           g_source_rate = 0; // the rate we opened it for
+std::string        g_device_name;
 
-std::mutex g_mutex;
-int        g_found    = -1; // -1 unknown, 0 no endpoint, 1 yes
-bool       g_enabled  = true;
-bool       g_log      = false;
-float      g_gain     = 1.0f;
-bool       g_all_channels  = false;
-uint32_t   g_first_channel = 2; // the actuator pair; KYTY_DUALSENSE_HAPTICS_CHANNELS overrides it
-uint32_t   g_channel_count = 2;
-// The speaker route has its own channels and gain: the pad's speaker is small, so its port often
-// needs more level than the actuators, and which pair carries it is worth an experiment.
-uint32_t   g_speaker_first_channel = 0;
-uint32_t   g_speaker_channel_count = 2;
-float      g_speaker_gain          = 8.0f;
+// The level each route is played at. The pad's speaker is small and the samples its port carries
+// are far too quiet for it, so the speaker route gets 8x -- upstream's own default -- and the
+// actuators the guest's level. Both are overridable, as upstream's are, so a level that does not
+// suit a given pad can be tried without a rebuild.
+constexpr float DEFAULT_SPEAKER_GAIN   = 8.0f;
+constexpr float DEFAULT_VIBRATION_GAIN = 1.0f;
+bool            g_log            = false;
+float           g_speaker_gain   = DEFAULT_SPEAKER_GAIN;
+float           g_vibration_gain = DEFAULT_VIBRATION_GAIN;
 
-std::string Narrow(const wchar_t* text) {
-	std::string out;
-	if (text == nullptr) {
-		return out;
+// A quad-channel DualSense endpoint, probed at most every RECHECK_MS.
+struct Endpoint {
+	bool        probed   = false;
+	int         index    = -1;
+	std::string name;
+	uint32_t    freq     = 0;
+	uint32_t    channels = 0;
+};
+Endpoint g_endpoint;
+uint64_t g_endpoint_check_at = 0;
+
+// The pad the speaker routing is applied to, and the SDL device id of the route that owns it.
+int g_speaker_controller = -1;
+
+// Scratch buffers, kept between calls so a per-frame write does not allocate twice over.
+std::vector<float> g_source;  // the guest's frames, scaled, two channels
+// The block being filled. libAudio writes the pad speaker port and the vibration port of one batch
+// back to back, and both routes have to land in the SAME quad frames: queueing each route's block on
+// its own leaves the other route's channel pair zero for that stretch, so the pad hears every route
+// with a silent gap as long as the other one -- a chopped, buzzing speaker. A block is therefore
+// held until both routes have filled it, or until the next block starts, and then queued in one go.
+std::vector<float> g_pending;
+uint32_t           g_pending_frames    = 0;
+bool               g_pending_speaker   = false;
+bool               g_pending_vibration = false;
+
+// Where pad speaker and vibration audio goes, for the console diagnostics: printed when it changes,
+// per route, so a 2-second device recheck does not repeat it.
+enum class Route { Unknown, NoPad, NoUsbDevice, NoSpeakerRoute, Usb, UsbFailed };
+std::atomic<Route> g_reported_route[2] {Route::Unknown, Route::Unknown};
+
+// A level from the environment, taken only when it is a number in range (upstream's own limits).
+float ReadGain(const char* name, float fallback, float maximum) {
+	const char* value = std::getenv(name);
+	if (value == nullptr) {
+		return fallback;
 	}
-	for (; *text != L'\0'; text++) {
-		out.push_back(*text < 128 ? static_cast<char>(*text) : '?');
+	const float gain = std::strtof(value, nullptr);
+	if (!(gain >= 0.0f) || gain > maximum) {
+		return fallback;
 	}
-	return out;
+	return gain;
 }
 
-// The pad's speaker stays silent until the host routes the endpoint's audio to it: the controller's
-// own mixer sits on the headphone output, and the USB endpoint only carries samples to it. These are
-// the values the Linux driver sends with no headphones plugged in, through output report 0x02: route
-// the right channel to the speaker, mute the headphones, speaker volume 100 and the +6 dB preamp.
-// github.com/Jetsku/KytyPS5 routes it the same way ("the values Linux uses without headphones"), and
-// without it the speaker plays nothing here while the pad's own "test" tone stays faint. Passing
-// false restores the headphone routing.
-bool RouteSpeaker(bool speaker) {
-	std::array<uint8_t, 38> report {};
-	report[0] = 0x80; // audio control valid
-	if (speaker) {
-		report[0] |= 0x20; // speaker volume valid
-		report[1]  = 0x80; // audio control 2 valid
-		report[5]  = 0x64; // speaker volume, 100 of 100
-		report[7]  = 0x30; // output path: right channel to the speaker, headphones muted
-		report[37] = 0x02; // speaker preamp, +6 dB
-	}
-
-	const int devices = SDL_NumJoysticks();
-	for (int i = 0; i < devices; i++) {
-		auto* pad = SDL_GameControllerFromInstanceID(SDL_JoystickGetDeviceInstanceID(i));
-		if (pad == nullptr || SDL_GameControllerGetType(pad) != SDL_CONTROLLER_TYPE_PS5) {
-			continue;
-		}
-		const bool sent =
-		    SDL_GameControllerSendEffect(pad, report.data(), static_cast<int>(report.size())) == 0;
-		std::printf("DualSense: audio routing -> %s%s\n", speaker ? "the pad's speaker" : "headphones",
-		            sent ? "" : " (the HID report was refused)");
-		return sent;
-	}
-	return false;
-}
-
-std::string Trimmed(std::string text) {	const auto spaces = " \t\r\n";
-	const auto first  = text.find_first_not_of(spaces);
-	if (first == std::string::npos) {
-		return {};
-	}
-	const auto last = text.find_last_not_of(spaces);
-	return text.substr(first, last - first + 1);
-}
-
-std::string Lowered(std::string text) {
-	for (auto& c : text) {
-		if (c >= 'A' && c <= 'Z') {
-			c = static_cast<char>(c - 'A' + 'a');
-		}
-	}
-	return text;
-}
-
-// Channel pairs as text: "01" (the speaker pair), "23" (the actuator pair), "all".
-void ParseChannels(const std::string& text, uint32_t* first, uint32_t* count, bool* all) {
-	if (text == "all" || text == "4") {
-		*all = true;
-		return;
-	}
-	if (text == "01" || text == "0") {
-		*first = 0;
-		*count = 2;
-	} else if (text == "23" || text == "2") {
-		*first = 2;
-		*count = 2;
-	}
-}
-
-// dualsense-haptics.txt next to the emulator (the launcher's working directory): one "key=value" a
-// line, "#" starts a comment. The environment is awkward to set under the launcher - editing
-// run.cmd or a shortcut - and this file is easy to edit, to keep, and to delete. It is applied
-// after the environment, so a line here wins.
-void ReadSettingsFile() {
-	static bool read = false;
-	if (read) {
-		return;
-	}
-	read = true;
-
-	auto* file = std::fopen("dualsense-haptics.txt", "rb");
-	if (file == nullptr) {
-		return;
-	}
-
-	char line[256] = {};
-	while (std::fgets(line, sizeof(line), file) != nullptr) {
-		std::string text(line);
-		const auto  hash = text.find('#');
-		if (hash != std::string::npos) {
-			text.erase(hash);
-		}
-		const auto equals = text.find('=');
-		if (equals == std::string::npos) {
-			continue;
-		}
-		const auto key   = Lowered(Trimmed(text.substr(0, equals)));
-		const auto value = Trimmed(text.substr(equals + 1));
-		if (key.empty() || value.empty()) {
-			continue;
-		}
-
-		if (key == "enabled") {
-			g_enabled = value != "0" && Lowered(value) != "false" && Lowered(value) != "no";
-		} else if (key == "log") {
-			g_log = value != "0" && Lowered(value) != "false" && Lowered(value) != "no";
-		} else if (key == "gain" || key == "vibration_gain") {
-			const auto gain = std::strtof(value.c_str(), nullptr);
-			if (gain > 0.0f && gain <= 8.0f) {
-				g_gain = gain;
-			}
-		} else if (key == "speaker_gain") {
-			const auto gain = std::strtof(value.c_str(), nullptr);
-			if (gain >= 0.0f && gain <= 64.0f) {
-				g_speaker_gain = gain;
-			}
-		} else if (key == "channels" || key == "vibration_channels") {
-			ParseChannels(value, &g_first_channel, &g_channel_count, &g_all_channels);
-		} else if (key == "speaker_channels") {
-			ParseChannels(value, &g_speaker_first_channel, &g_speaker_channel_count, &g_all_channels);
-		}
-	}
-	std::fclose(file);
-
-	std::printf("DualSense: dualsense-haptics.txt: %s, vibration gain %.2f on channels %u-%u, "
-	            "speaker gain %.2f on channels %u-%u%s\n",
-	            g_enabled ? "on" : "off", static_cast<double>(g_gain), g_first_channel,
-	            g_first_channel + g_channel_count - 1u, static_cast<double>(g_speaker_gain),
-	            g_speaker_first_channel, g_speaker_first_channel + g_speaker_channel_count - 1u,
-	            g_all_channels ? ", all channels" : "");
-}
-
+// The environment is read once. KYTY_DUALSENSE_SPEAKER_GAIN and KYTY_DUALSENSE_HAPTICS_GAIN are the
+// knobs upstream has, under its names, so a level can be tuned per pad without a rebuild.
 void ReadSettings() {
 	static bool read = false;
 	if (read) {
 		return;
 	}
-	read = true;
-
-	if (const char* value = std::getenv("KYTY_DUALSENSE_HAPTICS"); value != nullptr) {
-		g_enabled = std::string(value) != "0";
-	}
-	if (const char* value = std::getenv("KYTY_DUALSENSE_HAPTICS_CHANNELS"); value != nullptr) {
-		const std::string channels(value);
-		if (channels == "all") {
-			g_all_channels = true;
-		} else if (channels == "01") {
-			g_first_channel = 0;
-			g_channel_count = 2;
-		} else if (channels == "23") {
-			g_first_channel = 2;
-			g_channel_count = 2;
-		} else if (!channels.empty()) {
-			g_first_channel = static_cast<uint32_t>(channels[0] - '0');
-			g_channel_count = channels.size() > 1 ? static_cast<uint32_t>(channels[1] - '0') : 1;
-			g_channel_count = g_channel_count > g_first_channel
-			                      ? g_channel_count - g_first_channel + 1
-			                      : 1;
-		}
-	}
-	if (const char* value = std::getenv("KYTY_DUALSENSE_HAPTICS_GAIN"); value != nullptr) {
-		const auto gain = std::strtof(value, nullptr);
-		if (gain > 0.0f && gain <= 4.0f) {
-			g_gain = gain;
-		}
-	}
-	// KYTY_DUALSENSE_SPEAKER_CHANNELS=01|23|all and KYTY_DUALSENSE_SPEAKER_GAIN=<float>: which
-	// channels the pad speaker port plays on (0-1 by default, as the mainline and this module's
-	// first version do) and how much level it gets. Both keep the pad's USB id selection.
-	if (const char* value = std::getenv("KYTY_DUALSENSE_SPEAKER_CHANNELS"); value != nullptr) {
-		const std::string channels(value);
-		if (channels == "23") {
-			g_speaker_first_channel = 2;
-			g_speaker_channel_count = 2;
-		} else if (channels == "01") {
-			g_speaker_first_channel = 0;
-			g_speaker_channel_count = 2;
-		} else if (channels == "all") {
-			g_all_channels = true;
-		}
-	}
-	if (const char* value = std::getenv("KYTY_DUALSENSE_SPEAKER_GAIN"); value != nullptr) {
-		const auto gain = std::strtof(value, nullptr);
-		if (gain >= 0.0f && gain <= 64.0f) {
-			g_speaker_gain = gain;
-		}
-	}
-	if (const char* value = std::getenv("KYTY_DUALSENSE_HAPTICS_LOG"); value != nullptr) {
-		g_log = std::string(value) != "0";
-	}
-
-	// The file last, so it wins over the environment.
-	ReadSettingsFile();
+	read                = true;
+	const char* logging = std::getenv("KYTY_DUALSENSE_HAPTICS_LOG");
+	g_log               = logging != nullptr && std::strcmp(logging, "0") != 0;
+	g_speaker_gain      = ReadGain("KYTY_DUALSENSE_SPEAKER_GAIN", DEFAULT_SPEAKER_GAIN, 64.0f);
+	g_vibration_gain    = ReadGain("KYTY_DUALSENSE_HAPTICS_GAIN", DEFAULT_VIBRATION_GAIN, 4.0f);
 }
 
-// COM is initialized per thread and never uninitialized: the stream outlives any single call, and
-// releasing its last reference after CoUninitialize is not allowed. S_FALSE (already initialized)
-// and RPC_E_CHANGED_MODE (another apartment) are both fine here.
-void EnsureCom() {
-	static thread_local bool done = false;
-	if (!done) {
-		done = true;
-		(void)CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-	}
-}
-
-// The pad's output endpoint: exactly one active render device whose interface path is the pad's.
-IMMDevice* FindEndpoint() {
-	IMMDeviceEnumerator* enumerator = nullptr;
-	auto hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_INPROC_SERVER,
-	                           __uuidof(IMMDeviceEnumerator), reinterpret_cast<void**>(&enumerator));
-	if (FAILED(hr)) {
-		if (g_log) {
-			std::printf("DualSense: CoCreateInstance failed: 0x%08x\n", static_cast<uint32_t>(hr));
-		}
-		return nullptr;
-	}
-
-	IMMDeviceCollection* collection = nullptr;
-	hr = enumerator->EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE, &collection);
-	if (FAILED(hr) || collection == nullptr) {
-		enumerator->Release();
-		return nullptr;
-	}
-
-	UINT  count   = 0;
-	collection->GetCount(&count);
-
-	IMMDevice* matched = nullptr;
-	for (UINT i = 0; i < count; i++) {
-		IMMDevice* device = nullptr;
-		if (FAILED(collection->Item(i, &device)) || device == nullptr) {
-			continue;
-		}
-
-		IPropertyStore* store = nullptr;
-		bool            is_pad = false;
-		if (SUCCEEDED(device->OpenPropertyStore(STGM_READ, &store)) && store != nullptr) {
-			PROPVARIANT value;
-			PropVariantInit(&value);
-			if (SUCCEEDED(store->GetValue(PKEY_INTERFACE_FRIENDLY_NAME, &value)) &&
-			    value.vt == VT_LPWSTR && value.pwszVal != nullptr) {
-				const auto path = Narrow(value.pwszVal);
-				is_pad          = path.find(PAD_DEVICE_PATH) != std::string::npos;
-				if (g_log) {
-					std::printf("DualSense: endpoint %u: %s%s\n", i, path.c_str(),
-					            is_pad ? "  <- the pad" : "");
-				}
-			}
-			PropVariantClear(&value);
-			store->Release();
-		}
-
-		if (is_pad) {
-			if (matched != nullptr) {
-				// Two pads: which one is playing is not knowable here, and driving the wrong one
-				// would be worse than not driving any (the mainline refuses ambiguous endpoints too).
-				device->Release();
-				matched->Release();
-				matched = nullptr;
-				std::printf("DualSense: more than one pad endpoint, none is used\n");
-				break;
-			}
-			matched = device;
-			continue;
-		}
-		device->Release();
-	}
-
-	collection->Release();
-	enumerator->Release();
-	return matched;
-}
-
-} // namespace
-
-bool Available() {
+bool Logging() {
 	ReadSettings();
-	if (!g_enabled) {
+	return g_log;
+}
+
+bool SettingEnabled() {
+	static const bool enabled = [] {
+		const char* value = std::getenv("KYTY_DUALSENSE_HAPTICS");
+		if (value == nullptr) {
+			return true;
+		}
+		return !(std::strcmp(value, "0") == 0 || std::strcmp(value, "false") == 0);
+	}();
+	return enabled;
+}
+
+// SDL2's string helpers have no SDL_strcasestr; this is the same "contains, ignoring case" test the
+// device name match needs.
+bool ContainsNoCase(const char* text, const char* needle) {
+	if (text == nullptr || needle == nullptr) {
 		return false;
 	}
-	if (g_found >= 0) {
-		return g_found == 1;
+	const size_t needle_len = std::strlen(needle);
+	if (needle_len == 0) {
+		return true;
 	}
-
-	EnsureCom();
-
-	IMMDevice* device = FindEndpoint();
-	g_found           = device != nullptr ? 1 : 0;
-	if (device != nullptr) {
-		device->Release();
-		std::printf("DualSense: the pad's audio endpoint is available (speaker 0-1, actuators %u-%u)\n",
-		            g_first_channel, g_first_channel + g_channel_count - 1u);
-	} else {
-		std::printf("DualSense: no audio endpoint found (no pad speaker and no haptics)\n");
-	}
-	return g_found == 1;
-}
-
-uint32_t SampleRate() {
-	std::lock_guard lock(g_mutex);
-	return g_mix != nullptr ? g_mix->nSamplesPerSec : 0;
-}
-
-uint32_t EndpointChannels() {
-	std::lock_guard lock(g_mutex);
-	return g_mix != nullptr ? g_mix->nChannels : 0;
-}
-
-bool SpeakerActive() {
-	std::lock_guard lock(g_mutex);
-	return (g_routes & ROUTE_SPEAKER) != 0U;
-}
-
-bool Open(bool speaker) {
-	ReadSettings();
-	if (!g_enabled) {
-		return false;
-	}
-
-	std::lock_guard lock(g_mutex);
-	const auto route = speaker ? ROUTE_SPEAKER : ROUTE_VIBRATION;
-	if ((g_routes & route) != 0U) {
-		return true; // this route is already playing
-	}
-
-	if (g_client == nullptr) {
-		EnsureCom();
-
-		IMMDevice* device = FindEndpoint();
-		if (device == nullptr) {
-			return false;
+	for (const char* p = text; *p != '\0'; p++) {
+		size_t i = 0;
+		while (i < needle_len && p[i] != '\0' &&
+		       std::tolower(static_cast<unsigned char>(p[i])) ==
+		           std::tolower(static_cast<unsigned char>(needle[i]))) {
+			i++;
 		}
-		g_found = 1;
-
-		bool opened = false;
-		do {
-			if (FAILED(device->Activate(__uuidof(IAudioClient), CLSCTX_INPROC_SERVER, nullptr,
-			                            reinterpret_cast<void**>(&g_client))) ||
-			    g_client == nullptr) {
-				break;
-			}
-
-			if (FAILED(g_client->GetMixFormat(&g_mix)) || g_mix == nullptr) {
-				break;
-			}
-			if (g_mix->wFormatTag != WAVE_FORMAT_IEEE_FLOAT &&
-			    g_mix->wFormatTag != WAVE_FORMAT_EXTENSIBLE) {
-				break;
-			}
-			if (g_mix->wBitsPerSample != 32) {
-				break;
-			}
-
-			// 100 ms of buffer; the pad's own path starts about a second late, which the queue
-			// covers as long as the game keeps writing.
-			if (FAILED(
-			        g_client->Initialize(AUDCLNT_SHAREMODE_SHARED, 0, 1000000LL, 0, g_mix, nullptr))) {
-				break;
-			}
-			if (FAILED(g_client->GetBufferSize(&g_buffer_frames))) {
-				break;
-			}
-			if (FAILED(g_client->GetService(__uuidof(IAudioRenderClient),
-			                                reinterpret_cast<void**>(&g_render))) ||
-			    g_render == nullptr) {
-				break;
-			}
-			if (FAILED(g_client->Start())) {
-				break;
-			}
-			opened = true;
-		} while (false);
-
-		device->Release();
-
-		if (!opened) {
-			Close(speaker);
-			std::printf("DualSense: the pad's endpoint could not be opened\n");
-			return false;
+		if (i == needle_len) {
+			return true;
 		}
-
-		std::printf("DualSense: stream open: %u Hz, %u ch, buffer %u frames, gains %.2f/%.2f "
-		            "(vibration/speaker)\n",
-		            g_mix->nSamplesPerSec, g_mix->nChannels, g_buffer_frames,
-		            static_cast<double>(g_gain), static_cast<double>(g_speaker_gain));
 	}
+	return false;
+}
 
-	g_routes |= route;
-	const auto first = speaker ? g_speaker_first_channel : g_first_channel;
-	const auto count = speaker ? g_speaker_channel_count : g_channel_count;
-	std::printf("DualSense: %s route on channels %u-%u (gain %.2f)\n", speaker ? "speaker" : "vibration",
-	            first, first + count - 1u, static_cast<double>(speaker ? g_speaker_gain : g_gain));
+void ReportRoute(bool speaker, Route route, const char* detail) {
+	auto& reported = g_reported_route[speaker ? 1 : 0];
+	if (reported.exchange(route) == route) {
+		return;
+	}
+	const char* text = "unknown";
+	switch (route) {
+		case Route::NoPad: text = "no wired DualSense; not played"; break;
+		case Route::NoUsbDevice:
+			text = "wired DualSense, but no 4-channel 'Wireless Controller' audio device";
+			break;
+		case Route::NoSpeakerRoute: text = "the pad refused the speaker routing"; break;
+		case Route::Usb: text = "USB audio device"; break;
+		case Route::UsbFailed: text = "USB audio device failed to open"; break;
+		case Route::Unknown: break;
+	}
+	LOGF("DualSense %s audio: %s%s%s\n", speaker ? "speaker" : "vibration", text,
+	     detail != nullptr ? ": " : "", detail != nullptr ? detail : "");
+}
+
+bool IsDualSenseDevice(int device_index) {
+	const auto vendor  = SDL_JoystickGetDeviceVendor(device_index);
+	const auto product = SDL_JoystickGetDeviceProduct(device_index);
+	return vendor == SONY_VENDOR && (product == DUALSENSE_PID || product == DUALSENSE_EDGE_PID);
+}
+
+// The instance id of the one DualSense on the host, or -1.
+//
+// SDL exposes no portable association between a gamepad and its USB audio endpoint, so a second pad
+// would make the routing a guess; requiring exactly one is what the addon has always done, and what
+// upstream's endpoint-by-USB-id lookup solves on its side.
+int SinglePad() {
+	SDL_LockJoysticks();
+	const int count          = SDL_NumJoysticks();
+	int       total          = 0;
+	int       found          = -1;
+	for (int i = 0; i < count; i++) {
+		if (!IsDualSenseDevice(i)) {
+			continue;
+		}
+		total++;
+		found = static_cast<int>(SDL_JoystickGetDeviceInstanceID(i));
+	}
+	SDL_UnlockJoysticks();
+	return total == 1 ? found : -1;
+}
+
+void RefreshEndpointLocked() {
+	const auto now = SDL_GetTicks();
+	if (g_endpoint.probed && now < g_endpoint_check_at) {
+		return;
+	}
+	g_endpoint_check_at = now + RECHECK_MS;
+	g_endpoint.probed   = true;
+	g_endpoint.index    = -1;
+	g_endpoint.name.clear();
+	g_endpoint.freq     = 0;
+	g_endpoint.channels = 0;
+
+	if (SDL_WasInit(SDL_INIT_AUDIO) == 0) {
+		return;
+	}
+	const int count = SDL_GetNumAudioDevices(0);
+	for (int i = 0; i < count; i++) {
+		const char* name = SDL_GetAudioDeviceName(i, 0);
+		if (name == nullptr ||
+		    (!ContainsNoCase(name, "DualSense") && !ContainsNoCase(name, "Wireless Controller"))) {
+			continue;
+		}
+		SDL_AudioSpec spec {};
+		if (SDL_GetAudioDeviceSpec(i, 0, &spec) != 0 || spec.channels != OUTPUT_CHANNELS) {
+			continue;
+		}
+		if (g_endpoint.index >= 0) {
+			// Multiple matching endpoints cannot be associated reliably either.
+			g_endpoint.index = -1;
+			g_endpoint.name.clear();
+			return;
+		}
+		g_endpoint.index    = i;
+		g_endpoint.name     = name;
+		g_endpoint.freq     = static_cast<uint32_t>(spec.freq);
+		g_endpoint.channels = static_cast<uint32_t>(spec.channels);
+	}
+}
+
+// Routes the pad's own output: right channel to the speaker, headphones muted. SDL2 posts this
+// packet verbatim into DS5EffectsState_t (see SDL_hidapi_ps5.c), so the byte offsets below are the
+// struct's fields. SDL_GameControllerSendEffect returns 0 on success.
+bool RouteSpeaker(int controller, bool speaker) {
+	std::array<uint8_t, 38> report {};
+	report[0] = 0x80; // Audio control valid
 	if (speaker) {
-		// Without this the endpoint's samples never reach the pad's speaker (see RouteSpeaker).
-		(void)RouteSpeaker(true);
+		report[0] |= 0x20; // Speaker volume valid
+		report[1]  = 0x80; // Audio control 2 valid
+		report[5]  = 0x64; // Speaker volume
+		report[7]  = 0x30; // Output path: right channel to the speaker, headphones muted
+		report[37] = 0x02; // Speaker preamp +6 dB
 	}
+	bool routed = false;
+	SDL_LockJoysticks();
+	if (auto* pad = SDL_GameControllerFromInstanceID(static_cast<SDL_JoystickID>(controller));
+	    pad != nullptr) {
+		routed = SDL_GameControllerSendEffect(pad, report.data(), static_cast<int>(report.size())) == 0;
+	}
+	SDL_UnlockJoysticks();
+	return routed;
+}
+
+// Caller holds g_mutex; -1 restores headphone routing.
+bool SelectSpeakerLocked(int controller) {
+	if (g_speaker_controller == controller) {
+		return true;
+	}
+	if (g_speaker_controller != -1) {
+		RouteSpeaker(g_speaker_controller, false);
+	}
+	g_speaker_controller = -1;
+	if (controller != -1 && !RouteSpeaker(controller, true)) {
+		return false;
+	}
+	g_speaker_controller = controller;
 	return true;
 }
 
-void Close(bool speaker) {
-	std::lock_guard lock(g_mutex);
-	const bool had_speaker = (g_routes & ROUTE_SPEAKER) != 0U;
-	g_routes &= ~(speaker ? ROUTE_SPEAKER : ROUTE_VIBRATION);
-	if (g_routes != 0U) {
-		return; // another route is still playing
-	}
+// `obtained_freq` receives the rate the endpoint actually took, which SDL may have chosen for us.
+SDL_AudioDeviceID OpenDevice(const std::string& name, uint32_t freq, uint32_t* obtained_freq) {
+	SDL_AudioSpec desired {};
+	desired.freq     = static_cast<int>(freq);
+	desired.format   = AUDIO_F32SYS;
+	desired.channels = OUTPUT_CHANNELS;
+	desired.samples  = 1024;
+	desired.callback = nullptr; // Queued audio (SDL_QueueAudio) requires a null callback.
 
-	if (had_speaker) {
-		(void)RouteSpeaker(false); // the pad's headphone routing goes back, as on the console
+	SDL_AudioSpec     obtained {};
+	SDL_AudioDeviceID device =
+	    SDL_OpenAudioDevice(name.c_str(), 0, &desired, &obtained, SDL_AUDIO_ALLOW_ANY_CHANGE);
+	if (device == 0) {
+		LOGF("DualSenseHaptics: cannot open quad output: %s\n", SDL_GetError());
+		return 0;
 	}
-
-	if (g_client != nullptr) {
-		g_client->Stop();
-		g_client->Release();
-		g_client = nullptr;
+	if (obtained.channels != OUTPUT_CHANNELS || obtained.format != AUDIO_F32SYS ||
+	    obtained.freq <= 0) {
+		// SDL_QueueAudio cannot convert, so a device that took another format would play garbage.
+		LOGF("DualSenseHaptics: '%s' took %d ch %u Hz fmt 0x%04x, not 4 ch float\n", name.c_str(),
+		     obtained.channels, static_cast<uint32_t>(obtained.freq),
+		     static_cast<uint32_t>(obtained.format));
+		SDL_CloseAudioDevice(device);
+		return 0;
 	}
-	if (g_render != nullptr) {
-		g_render->Release();
-		g_render = nullptr;
+	SDL_PauseAudioDevice(device, 0);
+	if (obtained_freq != nullptr) {
+		*obtained_freq = static_cast<uint32_t>(obtained.freq);
 	}
-	if (g_mix != nullptr) {
-		CoTaskMemFree(g_mix);
-		g_mix = nullptr;
-	}
-	g_buffer_frames = 0;
+	return device;
 }
 
-bool Write(const void* data, uint32_t frames, uint32_t source_rate, uint32_t source_channels,
-           bool is_float, bool speaker, const float* gains) {
-	std::lock_guard lock(g_mutex);
-	if (g_client == nullptr || data == nullptr || frames == 0 || source_channels == 0 ||
-	    g_mix == nullptr) {
-		return false;
+// Caller holds g_mutex. Unlocks the device and gives the routing back.
+void CloseDeviceLocked() {
+	if (g_device != 0) {
+		SDL_CloseAudioDevice(g_device);
+		g_device = 0;
 	}
-	if ((g_routes & (speaker ? ROUTE_SPEAKER : ROUTE_VIBRATION)) == 0U) {
-		return false;
-	}
+	g_device_name.clear();
+	g_device_freq = 0;
+	g_source_rate = 0;
+	g_pending.clear();
+	g_pending_frames    = 0;
+	g_pending_speaker   = false;
+	g_pending_vibration = false;
+}
 
-	const auto target_rate     = g_mix->nSamplesPerSec;
-	const auto target_channels = g_mix->nChannels;
-	if (target_rate == 0 || target_channels < 2) {
-		return false;
-	}
-
-	const auto first_channel = speaker ? g_speaker_first_channel : g_first_channel;
-	const auto channel_count = speaker ? g_speaker_channel_count : g_channel_count;
-	const auto route_gain    = speaker ? g_speaker_gain : g_gain;
-	const auto channels      = g_all_channels ? target_channels : channel_count;
-
-	// Resample (linear: enough for haptics) and put the signal in the route's channels.
-	const auto out_frames = source_rate == target_rate
-	                            ? frames
-	                            : static_cast<uint32_t>(static_cast<uint64_t>(frames) * target_rate /
-	                                                    source_rate);
-	if (out_frames == 0) {
-		return false;
-	}
-
-	UINT32 padding = 0;
-	if (FAILED(g_client->GetCurrentPadding(&padding))) {
-		return false;
-	}
-	const auto free = g_buffer_frames > padding ? g_buffer_frames - padding : 0;
-	if (free < out_frames) {
-		return false; // behind: drop rather than delay the guest's audio thread
-	}
-
-	BYTE* buffer = nullptr;
-	if (FAILED(g_render->GetBuffer(out_frames, &buffer)) || buffer == nullptr) {
-		return false;
-	}
-
-	auto* out = reinterpret_cast<float*>(buffer);
-	std::memset(out, 0, static_cast<size_t>(out_frames) * target_channels * sizeof(float));
-
+// Scales the guest's frames into two float channels (mono is duplicated, extra channels dropped).
+// libAudio's PrepareOutputBuffer has already applied the port's volume and channel layout; `gains`
+// is the guest's own per-channel gain, where a pad's speaker and vibration levels live.
+bool ScaleSource(const void* data, uint32_t frames, uint32_t channels, bool is_float,
+                 const float* gains) {
+	g_source.assign(static_cast<size_t>(frames) * 2, 0.0f);
 	float peak = 0.0f;
-
-	for (uint32_t i = 0; i < out_frames; i++) {
-		const auto source_index =
-		    source_rate == target_rate
-		        ? i
-		        : static_cast<uint32_t>(static_cast<uint64_t>(i) * source_rate / target_rate);
-		if (source_index >= frames) {
-			break;
-		}
-
-		// Mono fills every channel of the route (a one-channel pad speaker port has to drive both of
-		// its channels, or only one side plays), stereo maps one to one.
-		for (uint32_t c = 0; c < channels; c++) {
-			const auto source_channel =
-			    source_channels == 1 ? 0u : (c < source_channels ? c : source_channels - 1u);
-			float value = 0.0f;
-			if (is_float) {
-				value = reinterpret_cast<const float*>(data)[static_cast<size_t>(source_index) *
-				                                                 source_channels +
-				                                             source_channel];
-			} else {
-				value = static_cast<float>(reinterpret_cast<const int16_t*>(data)[
-				            static_cast<size_t>(source_index) * source_channels + source_channel]) /
-				        32768.0f;
-			}
-			value *= route_gain;
+	for (uint32_t frame = 0; frame < frames; frame++) {
+		for (uint32_t ch = 0; ch < 2; ch++) {
+			const uint32_t src_ch = channels == 1 ? 0 : (ch < channels ? ch : channels - 1);
+			const size_t   index  = static_cast<size_t>(frame) * channels + src_ch;
+			float          value  = is_float ? static_cast<const float*>(data)[index]
+			                                 : static_cast<const int16_t*>(data)[index] / 32768.0f;
 			if (gains != nullptr) {
-				value *= gains[source_channel];
+				value *= gains[src_ch];
 			}
+			if (!std::isfinite(value)) {
+				value = 0.0f;
+			}
+			g_source[static_cast<size_t>(frame) * 2 + ch] = value;
+			peak = std::max(peak, std::fabs(value));
+		}
+	}
+	return peak > 1.0f / 1024;
+}
+
+// Caller holds g_mutex. Resamples the held block's route into place: the guest's frames, already
+// scaled by libAudio's port volume and channel layout, are placed in the route's channel pair of the
+// quad frame with the route's level on top. Values are clamped, as upstream clamps them: the pad's
+// USB endpoint takes floats and full scale is all it can carry.
+void FillRouteLocked(bool speaker, uint32_t source_rate, uint32_t out_frames) {
+	const auto source_frames = static_cast<uint32_t>(g_source.size() / 2);
+	if (source_frames == 0 || out_frames == 0) {
+		return;
+	}
+	// USB places the speaker in front and the actuators in back, so a vibration route fills the back
+	// pair and a speaker route the front one.
+	const uint32_t offset = speaker ? 0 : 2;
+	const float    gain   = speaker ? g_speaker_gain : g_vibration_gain;
+	const double   step   = static_cast<double>(source_rate) / g_device_freq;
+
+	for (uint32_t frame = 0; frame < out_frames; frame++) {
+		const double position = frame * step;
+		const auto   index    = static_cast<uint32_t>(position);
+		const double fraction = position - index;
+		const auto   first    = std::min(index, source_frames - 1);
+		const auto   second   = std::min(index + 1, source_frames - 1);
+		for (uint32_t ch = 0; ch < 2; ch++) {
+			const float a =
+			    g_source[static_cast<size_t>(first) * 2 + ch] * gain;
+			const float b =
+			    g_source[static_cast<size_t>(second) * 2 + ch] * gain;
+			float value = a + (b - a) * fraction;
 			if (value > 1.0f) {
 				value = 1.0f;
 			} else if (value < -1.0f) {
 				value = -1.0f;
 			}
-			if (value > peak) {
-				peak = value;
-			} else if (-value > peak) {
-				peak = -value;
-			}
+			g_pending[static_cast<size_t>(frame) * OUTPUT_CHANNELS + offset + ch] = value;
+		}
+	}
+}
 
-			if (g_all_channels) {
-				for (uint32_t target = 0; target < target_channels; target++) {
-					out[static_cast<size_t>(i) * target_channels + target] = value;
-				}
-				continue;
-			}
+// Caller holds g_mutex. Queues the held block and starts a new one. A block the endpoint is too far
+// behind to take is dropped whole, which is what upstream does (it refuses the write): that leaves
+// the queued audio untouched, while taking bytes off its front would cut the stream mid-sample and
+// be heard as a click every time the host falls behind.
+bool FlushPendingLocked() {
+	if (g_pending_frames == 0) {
+		return true;
+	}
+	const auto bytes = static_cast<int64_t>(g_pending_frames) * FRAME_BYTES;
+	const auto limit = static_cast<int64_t>(g_device_freq) * FRAME_BYTES * MAX_QUEUE_MS / 1000;
 
-			const auto channel = first_channel + c;
-			if (channel < target_channels) {
-				out[static_cast<size_t>(i) * target_channels + channel] = value;
+	bool result = true;
+	if (g_device != 0 && g_device_freq != 0) {
+		const auto queued = static_cast<int64_t>(SDL_GetQueuedAudioSize(g_device));
+		if (queued + bytes <= limit) {
+			if (SDL_QueueAudio(g_device, g_pending.data(), static_cast<uint32_t>(bytes)) < 0) {
+				LOGF("DualSenseHaptics: SDL_QueueAudio failed: %s\n", SDL_GetError());
+				result = false;
 			}
 		}
 	}
 
-	g_render->ReleaseBuffer(out_frames, 0);
+	g_pending.clear();
+	g_pending_frames    = 0;
+	g_pending_speaker   = false;
+	g_pending_vibration = false;
+	return result;
+}
 
-	// What actually reaches the pad, so a log says whether the game fills this route at all: the
-	// first writes, then one every 512 (about every 2.7 s of 5 ms calls), with their peak level.
-	static uint32_t speaker_writes  = 0;
-	static uint32_t vibration_writes = 0;
-	auto&           writes          = speaker ? speaker_writes : vibration_writes;
-	writes++;
-	if (writes <= 4 || (writes % 512) == 0) {
-		std::printf("DualSense: %s write %u: %u frames at %u Hz, %u ch, %s, gains %s%.2f, peak %.3f, "
-		            "queue %u/%u\n",
-		            speaker ? "speaker" : "vibration", writes, frames, source_rate, source_channels,
-		            is_float ? "float" : "s16", gains != nullptr ? "" : "(none) ",
-		            static_cast<double>(gains != nullptr ? gains[0] : 1.0f),
-		            static_cast<double>(peak), padding, g_buffer_frames);
+} // namespace
+
+bool Available() {
+	if (!SettingEnabled()) {
+		return false;
+	}
+	Common::LockGuard lock(g_mutex);
+	RefreshEndpointLocked();
+	return g_endpoint.index >= 0;
+}
+
+uint32_t SampleRate() {
+	if (!SettingEnabled()) {
+		return 0;
+	}
+	Common::LockGuard lock(g_mutex);
+	RefreshEndpointLocked();
+	return g_endpoint.freq;
+}
+
+uint32_t EndpointChannels() {
+	if (!SettingEnabled()) {
+		return 0;
+	}
+	Common::LockGuard lock(g_mutex);
+	RefreshEndpointLocked();
+	return g_endpoint.channels;
+}
+
+bool Open(bool speaker) {
+	if (!SettingEnabled()) {
+		return false;
+	}
+	Common::LockGuard lock(g_mutex);
+
+	RefreshEndpointLocked();
+	if (g_endpoint.index < 0) {
+		return false;
+	}
+	if (speaker) {
+		const int pad = SinglePad();
+		if (pad < 0 || !SelectSpeakerLocked(pad)) {
+			return false;
+		}
+	}
+	g_routes |= speaker ? ROUTE_SPEAKER : ROUTE_VIBRATION;
+	return true;
+}
+
+void Close(bool speaker) {
+	if (!SettingEnabled()) {
+		return;
+	}
+	Common::LockGuard lock(g_mutex);
+
+	const uint32_t route = speaker ? ROUTE_SPEAKER : ROUTE_VIBRATION;
+	if ((g_routes & route) == 0) {
+		return;
+	}
+	g_routes &= ~route;
+	if (speaker) {
+		SelectSpeakerLocked(-1); // Back to the headphones.
+	}
+	if (g_routes == 0) {
+		CloseDeviceLocked();
+	}
+}
+
+bool SpeakerActive() {
+	if (!SettingEnabled()) {
+		return false;
+	}
+	Common::LockGuard lock(g_mutex);
+	RefreshEndpointLocked();
+	// Reported from the route, not from the open device: the first block of a pad speaker port must
+	// already stay off the main output, or it is heard there once at the latency difference.
+	return (g_routes & ROUTE_SPEAKER) != 0 && g_endpoint.index >= 0;
+}
+
+bool Write(const void* data, uint32_t frames, uint32_t source_rate, uint32_t source_channels,
+           bool is_float, bool speaker, const float* gains) {
+	if (!SettingEnabled() || data == nullptr || frames == 0 || source_rate == 0 ||
+	    source_channels == 0) {
+		return false;
+	}
+
+	Common::LockGuard lock(g_mutex);
+
+	const auto report = [&](Route route, const char* detail) {
+		if (Logging()) {
+			ReportRoute(speaker, route, detail);
+		}
+	};
+
+	const int pad = SinglePad();
+	if (pad < 0) {
+		CloseDeviceLocked();
+		report(Route::NoPad, nullptr);
+		return false;
+	}
+	if (speaker && !SelectSpeakerLocked(pad)) {
+		CloseDeviceLocked();
+		report(Route::NoSpeakerRoute, nullptr);
+		return false;
+	}
+
+	RefreshEndpointLocked();
+	if (g_endpoint.index < 0) {
+		CloseDeviceLocked();
+		report(Route::NoUsbDevice, nullptr);
+		return false;
+	}
+
+	// The endpoint is opened at the rate the guest sends, and reopened when that changes. The rate
+	// SDL actually gave us is kept separately: a shared-mode endpoint can insist on its own, and
+	// then the resampler above runs while the reopen check still compares like with like.
+	if (g_device == 0 || g_source_rate != source_rate || g_device_name != g_endpoint.name) {
+		CloseDeviceLocked();
+		uint32_t obtained_freq = 0;
+		g_device = OpenDevice(g_endpoint.name, source_rate, &obtained_freq);
+		if (g_device == 0) {
+			report(Route::UsbFailed, SDL_GetError());
+			return false;
+		}
+		g_device_name = g_endpoint.name;
+		g_device_freq = obtained_freq != 0 ? obtained_freq : source_rate;
+		g_source_rate = source_rate;
+		if (Logging()) {
+			ReportRoute(speaker, Route::Usb, g_device_name.c_str());
+		}
+	}
+
+	ReadSettings();
+
+	ScaleSource(data, frames, source_channels, is_float, gains);
+
+	// The length both routes of this batch share (libAudio writes the two ports back to back, with
+	// the same frame count each).
+	const auto source_frames = static_cast<uint32_t>(g_source.size() / 2);
+	if (source_frames == 0) {
+		return false;
+	}
+	const auto out_frames = std::max<uint32_t>(
+	    1, static_cast<uint32_t>(static_cast<uint64_t>(source_frames) * g_device_freq / source_rate));
+
+	// A held block that already carries this route, or carries one of another length, is the batch
+	// before this one: queue it, then fill a new one.
+	if (g_pending_frames != 0 &&
+	    (g_pending_frames != out_frames || (speaker ? g_pending_speaker : g_pending_vibration))) {
+		if (!FlushPendingLocked()) {
+			CloseDeviceLocked();
+			report(Route::UsbFailed, "the queue refused the audio");
+			return false;
+		}
+	}
+	if (g_pending_frames == 0) {
+		g_pending.assign(static_cast<size_t>(out_frames) * OUTPUT_CHANNELS, 0.0f);
+		g_pending_frames = out_frames;
+	}
+	FillRouteLocked(speaker, source_rate, out_frames);
+	if (speaker) {
+		g_pending_speaker = true;
+	} else {
+		g_pending_vibration = true;
+	}
+
+	// Both routes of the batch are in: the block goes out whole, so neither route's channel pair
+	// blanks the other's audio for that stretch.
+	if (g_pending_speaker && g_pending_vibration) {
+		if (!FlushPendingLocked()) {
+			CloseDeviceLocked();
+			report(Route::UsbFailed, "the queue refused the audio");
+			return false;
+		}
 	}
 	return true;
 }
 
 } // namespace Libs::Controller::DualSenseHaptics
-
-#else
-
-namespace Libs::Controller::DualSenseHaptics {
-
-bool     Available() { return false; }
-uint32_t SampleRate() { return 0; }
-uint32_t EndpointChannels() { return 0; }
-bool     Open(bool) { return false; }
-void     Close(bool) {}
-bool     Write(const void*, uint32_t, uint32_t, uint32_t, bool, bool, const float*) { return false; }
-bool     SpeakerActive() { return false; }
-
-} // namespace Libs::Controller::DualSenseHaptics
-
-#endif
