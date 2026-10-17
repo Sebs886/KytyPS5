@@ -318,11 +318,12 @@ function Get-WantedTendencies {
 		[void]$wanted.Add([pscustomobject]@{ Name = 'Tendency_Player_BlackWhite'; Value = $value })
 		[void]$wanted.Add([pscustomobject]@{ Name = 'Tendency_Player_LeftRight'; Value = $value })
 	}
-	foreach ($index in 0..6) {
+	for ($index = 0; $index -lt $worldCount; $index++) {
 		if (-not [bool]$settings.tendencyWorldOn[$index]) { continue }
 		$value = [single](ConvertTo-TendencyNumber $settings.tendencyWorlds[$index])
-		[void]$wanted.Add([pscustomobject]@{ Name = ('Tendency_World{0:00}_BlackWhite' -f $index); Value = $value })
-		[void]$wanted.Add([pscustomobject]@{ Name = ('Tendency_World{0:00}_LeftRight' -f $index); Value = $value })
+		$slot = $worldSlots[$index]
+		[void]$wanted.Add([pscustomobject]@{ Name = ('Tendency_World{0:00}_BlackWhite' -f $slot); Value = $value })
+		[void]$wanted.Add([pscustomobject]@{ Name = ('Tendency_World{0:00}_LeftRight' -f $slot); Value = $value })
 	}
 	return @($wanted)
 }
@@ -345,21 +346,28 @@ function Get-TendencyStatus {
 	try { $data = [System.IO.File]::ReadAllBytes($file.FullName) } catch { return "the save could not be read: $($_.Exception.Message)" }
 	if ($data.Length -lt 32) { return 'the save is too short to be a USR-DATA file' }
 	$worlds = @()
-	foreach ($index in 0..6) {
-		$worlds += Format-TendencyValue (Read-TendencyField $data ('Tendency_World{0:00}_BlackWhite' -f $index))
+	for ($index = 0; $index -lt $worldCount; $index++) {
+		$slot = $worldSlots[$index]
+		$worlds += Format-TendencyValue (Read-TendencyField $data ('Tendency_World{0:00}_BlackWhite' -f $slot))
 	}
-	return "$($file.Directory.Name)  ·  character $(Format-TendencyValue (Read-TendencyField $data 'Tendency_Player_BlackWhite'))  ·  world W0..W6 $($worlds -join '/')"
+	return "$($file.Directory.Name)  ·  character $(Format-TendencyValue (Read-TendencyField $data 'Tendency_Player_BlackWhite'))  ·  world W1..W5 $($worlds -join '/')"
 }
-# The seven world slots the game keeps a world tendency for, in the game's own numbering: 0 is the
-# Nexus, 1..5 are the five archstones and 6 is a slot this build has no archstone for. Both the
-# numbering and the names are the game's own words - its debug menu carries the page entries
-# "Current - World 1 (Boletarian Palace)" .. "Current - World 5 (Valley of Defilement)" and its
-# archstone list carries "0-1 Nexus", "1-1 Boletarian Palace" .. "5-1 Valley of Defilement" (the
-# unused world 6 has no "-1" line, and the tutorial is world 8), so nothing here is guessed.
-$worldCount = 7
-$worldLabels = @('W0  Nexus', 'W1  Boletarian Palace', 'W2  Stonefang Tunnel', 'W3  Tower of Latria',
-	'W4  Shrine of Storms', 'W5  Valley of Defilement', 'W6  (spare slot)')
-# What the save holds for the seven slots right now, in slot order; an empty list when there is no
+# The five worlds the game actually has, in the game's own order, each paired with the save slot its
+# tendency lives in. The slot numbers are NOT the world numbers, and that was measured rather than
+# assumed: with one distinct value per slot the game's Tendency page answered
+#   01 -> World 1 (Boletarian Palace)      05 -> World 2 (Stonefang Tunnel)
+#   03 -> World 3 (Tower of Latria)        02 -> World 4 (Shrine of Storms)
+#   04 -> World 5 (Valley of Defilement)
+# Slots 00 and 06 move nothing on that page at all: 00 is the Nexus (the game keeps no world
+# tendency for it) and 06 is the sixth world, which cannot be entered, so neither gets a row.
+# An earlier version of this launcher assumed slot N was world N and wrote 4 into world 2 - that is
+# exactly what put a value on the wrong world, so do not "tidy" this table back into 1,2,3,4,5.
+$worldCount = 5
+$worldLabels = @('W1  Boletarian Palace', 'W2  Stonefang Tunnel', 'W3  Tower of Latria',
+	'W4  Shrine of Storms', 'W5  Valley of Defilement')
+# The save slot behind each row above, in the same order as $worldLabels.
+$worldSlots = @(1, 5, 3, 2, 4)
+# What the save holds for those five worlds right now, in row order; an empty list when there is no
 # save to read. It is what the boxes are filled from the first time, so an upgrade shows the values
 # the game actually has instead of the one number this launcher used to keep for all of them.
 function Get-SavedWorldTendencies {
@@ -369,14 +377,15 @@ function Get-SavedWorldTendencies {
 	try { $data = [System.IO.File]::ReadAllBytes($files[0].FullName) } catch { return @() }
 	if ($data.Length -lt 32) { return @() }
 	$values = @()
-	foreach ($index in 0..6) {
-		$value = Read-TendencyField $data ('Tendency_World{0:00}_BlackWhite' -f $index)
+	for ($index = 0; $index -lt $worldCount; $index++) {
+		$slot = $worldSlots[$index]
+		$value = Read-TendencyField $data ('Tendency_World{0:00}_BlackWhite' -f $slot)
 		if ($null -eq $value) { return @() }
 		$values += [double]$value
 	}
 	return @($values)
 }
-# A stored setting is either the per-slot list of today or the single number/tick of an older file.
+# A stored setting is either the per-row list of today or the single number/tick of an older file.
 function Read-WorldSetting($saved, [int]$index) {
 	if ($saved -is [bool] -or $saved -is [string] -or $saved -is [int] -or $saved -is [long] -or
 		$saved -is [double] -or $saved -is [decimal] -or $saved -is [single]) { return $saved }
@@ -388,10 +397,18 @@ $worldPinned = @($false) * $worldCount
 $worldInitial = @(0.0) * $worldCount
 $seedWorlds = @()
 if (-not $worldsInSettings) { $seedWorlds = @(Get-SavedWorldTendencies) }
+# A settings file from the seven-slot launcher kept one entry per SAVE SLOT (0..6), while these rows
+# are the five worlds. The length tells the two apart, and re-indexing through $worldSlots is what
+# carries a user's numbers across the upgrade instead of putting them on the wrong world.
+$storedWorlds = @($settings.tendencyWorlds)
+$storedOn = @($settings.tendencyWorldOn)
+$storedBySlot = ($storedWorlds.Count -eq 7 -and $storedOn.Count -eq 7)
 for ($index = 0; $index -lt $worldCount; $index++) {
-	$ticked = Read-WorldSetting $settings.tendencyWorldOn $index
+	$lookup = $index
+	if ($storedBySlot) { $lookup = $worldSlots[$index] }
+	$ticked = Read-WorldSetting $storedOn $lookup
 	if ($null -ne $ticked) { $worldPinned[$index] = [bool]$ticked }
-	$stored = Read-WorldSetting $settings.tendencyWorlds $index
+	$stored = Read-WorldSetting $storedWorlds $lookup
 	if ($null -ne $stored) { $worldInitial[$index] = ConvertTo-TendencyNumber $stored }
 	elseif ($seedWorlds.Count -eq $worldCount) { $worldInitial[$index] = [double]$seedWorlds[$index] }
 }
@@ -767,11 +784,11 @@ if (Test-RunParam 'Hdr') {
 $rowTable = $modGrid
 
 # Tendency : the game's own values for world tendency and character tendency. They are floats on the
-# game's own -200 .. +200 scale, 0 being neutral. World tendency is one value per world - seven slots
-# in the game's own numbering, see $worldLabels above - and each is written on its own, so a world
-# can be set without dragging the other ones along. The game reads them out of the character save, so
-# the launcher writes them there before the emulator starts and a change applies on the next start,
-# not at once.
+# game's own -200 .. +200 scale, 0 being neutral. World tendency is one value per world - the five
+# worlds the game has, each on its own save slot, see $worldLabels/$worldSlots above - and each is
+# written on its own, so a world can be set without dragging the other ones along. The game reads
+# them out of the character save, so the launcher writes them there before the emulator starts and a
+# change applies on the next start, not at once.
 #
 # The order matters, and it is spelled out rather than left to a -Property hashtable: Minimum/Maximum
 # have to be in place before Value, because a NumericUpDown refuses a value outside the range it
@@ -787,13 +804,13 @@ function New-TendencyBox($saved) {
 	$box.Value = [decimal](ConvertTo-TendencyNumber $saved)
 	return $box
 }
-# The seven worlds as a two-wide table: a tick, a number, a tick, a number. Ticking a world is what
+# The five worlds as a two-wide table: a tick, a number, a tick, a number. Ticking a world is what
 # pins it; the number beside an unticked world stays grey, and that world is not written at all.
-$worldGrid = New-Object System.Windows.Forms.TableLayoutPanel -Property @{ ColumnCount = 4; RowCount = 4
+$worldGrid = New-Object System.Windows.Forms.TableLayoutPanel -Property @{ ColumnCount = 4; RowCount = 3
 	AutoSize = $true; AutoSizeMode = 'GrowAndShrink'; Margin = '0,0,0,0' }
 $autoSize = [System.Windows.Forms.SizeType]::AutoSize
 for ($column = 0; $column -lt 4; $column++) { $worldGrid.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle $autoSize)) }
-for ($row = 0; $row -lt 4; $row++) { $worldGrid.RowStyles.Add((New-Object System.Windows.Forms.RowStyle $autoSize)) }
+for ($row = 0; $row -lt 3; $row++) { $worldGrid.RowStyles.Add((New-Object System.Windows.Forms.RowStyle $autoSize)) }
 $tendencyWorldOn = @()
 $tendencyWorlds = @()
 for ($index = 0; $index -lt $worldCount; $index++) {
