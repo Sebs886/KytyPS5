@@ -1,0 +1,176 @@
+{
+    "name": "Demon's Souls",
+    "id": "PPSA01341",
+    "version": "01.007.000",
+    "process": "eboot.bin",
+    "mods": [
+        {
+            "name": "Max Souls (999,999,999)",
+            "description": "Every change of the carried souls ends at 999,999,999. The carried souls are the int at [PlayerStatus + 0x80] (cumulative souls are the qword at +0x88) -- the same fields the game's own 'cp11_setSouls [souls]' and 'cp11_addSouls [souls]' commands write. Every gain and every spend goes through the AddSouls(player, delta) routine at eboot RVA 0x4561E0, whose clamp tail is: edx = 999999999; ecx = old + delta; if (ecx < 999999999) edx = ecx; eax = 0; if (ecx >= 0) eax = edx; [rdi+0x80] = eax -- the total is capped at 999,999,999 and floored at 0. Two edits remove both conditions: the 'cmovb edx, ecx' at RVA 0x456200 becomes three NOPs (edx keeps the cap) and the 'xor eax, eax' at RVA 0x456203 becomes 'mov eax, edx' (so eax keeps it as well). The store then writes 999,999,999 whatever the delta is -- souls are neither lost on death nor spent down. Both edits are needed: with only the first one a negative delta still takes the 'eax = 0' path and zeroes the total. The first entry is that routine's prologue written back unchanged: it doubles as the file's anchor (the emulator's first non-zero `off` entry) and pins the match to this exact function, so a different eboot fails to match instead of patching a random address. NOTE: the entries this mod used to carry (RVA 0x20358C / 0x203593) were NOT the souls: that code stores a constant 256 into [r13+0x80], so the old patch only corrupted an unrelated field.",
+            "enabled": true,
+            "memory": [
+                {
+                    "offset": "4561E0",
+                    "off": "554889E5415653448BB780000000BAFFC99A3B",
+                    "on": "554889E5415653448BB780000000BAFFC99A3B"
+                },
+                {
+                    "offset": "456200",
+                    "off": "0F42D1",
+                    "on": "909090"
+                },
+                {
+                    "offset": "456203",
+                    "off": "31C0",
+                    "on": "89D0"
+                }
+            ]
+        },
+        {
+            "name": "Infinite HP  (Player - No Damage)",
+            "description": "Forces the game's own 'Player - No Damage' toggle ON. In the damage routine the game checks `cp11_characters_playerNoDamage` and then calls IsPlayer(); when both are true it skips the whole damage application. The conditional jump is turned into NOPs, so the check always passes (eboot RVA 0x32D693 - the `jne` of `cmp byte ptr [rax],1` at 0x32D690).",
+            "type": "checkbox",
+            "enabled": true,
+            "memory": [
+                {
+                    "offset": "32D690",
+                    "off": "8038017514",
+                    "on": "8038019090"
+                }
+            ]
+        },
+        {
+            "name": "Player Never Dies (revive)",
+            "description": "Forces the game's own 'Player - No Dead' toggle ON at all four places that consult it. When the player's HP would drop to 0 or below, the game restores 1 HP instead of dying (eboot RVA 0x325979 / 0x32AE61 / 0x32D7B6 / 0x32FD1A).",
+            "type": "checkbox",
+            "enabled": false,
+            "memory": [
+                {
+                    "offset": "325979",
+                    "off": "8038017516",
+                    "on": "8038019090"
+                },
+                {
+                    "offset": "32AE61",
+                    "off": "8038017516",
+                    "on": "8038019090"
+                },
+                {
+                    "offset": "32D7B6",
+                    "off": "8038017516",
+                    "on": "8038019090"
+                },
+                {
+                    "offset": "32FD1A",
+                    "off": "8038017516",
+                    "on": "8038019090"
+                }
+            ]
+        },
+        {
+            "name": "Infinite Stamina (Player - No Stamina Consume)",
+            "description": "Two patch sites, because the game drains stamina in two unrelated places and only ONE of them looks at the debug toggle. (1) eboot RVA 0x331A6F: the `jne` of `cmp byte ptr [rax],1` right after `lea rax, [&cp11_characters_playerNoStaminaConsume]` in the action-consumption routine - NOPed, so the toggle always reads as ON and the player skips the whole routine (used by attacks, rolls, blocks). (2) eboot RVA 0x3261FF: the sprint drain in the per-frame stamina update (`PlayerStatus` +0x724). It decrements the gauge by 1 every 0.1 s of accumulated sprint time and checks no toggle at all - that is why Infinite Stamina used to work while attacking but still drained while running. `lea ecx, [rax-1]` (sprint stamina minus one) is rewritten to `mov ecx, eax` (keep the current value), so the drain becomes a no-op. The gauge field is eboot+0x724, its maximum eboot+0x728.",
+            "type": "checkbox",
+            "enabled": true,
+            "memory": [
+                {
+                    "offset": "331A6F",
+                    "off": "8038017510",
+                    "on": "8038019090"
+                },
+                {
+                    "offset": "3261FF",
+                    "off": "8D48FF",
+                    "on": "89C190"
+                }
+            ]
+        },
+        {
+            "name": "Infinite MP",
+            "description": "Makes PlayerStatus::SetMp() ignore the requested value and always store MaxMP (eboot+0x71C, cap eboot+0x720). SetMp is the only function that writes the MP gauge, so MP can never drop - spells/attacks cost nothing. Patches: `cmovl eax,esi` -> NOPs (0x3259F2) and `cmovns r14d,eax` -> `mov r14d,eax` (0x3259FA). NOTE: the game's own `cp11_characters_playerNoManaConsume` toggle is dead code in 01.007.000 (nothing reads it), hence this direct patch.",
+            "type": "checkbox",
+            "enabled": true,
+            "memory": [
+                {
+                    "offset": "3259F2",
+                    "off": "0F4CC6",
+                    "on": "909090"
+                },
+                {
+                    "offset": "3259FA",
+                    "off": "440F49F0",
+                    "on": "4189C690"
+                }
+            ]
+        },
+        {
+            "name": "One Hit Kill (experimental)",
+            "description": "EXPERIMENTAL. In the damage routine the new HP is computed as `esi = targetHp - damage` and pushed into PlayerStatus::SetHp() at eboot RVA 0x32D703. `sub esi, r12d` (0x32D6FD) is replaced by `xor esi, esi; nop`, so any damage event sets the target's HP straight to 0 -> anything you touch dies. Because 'Infinite HP' makes the player skip this routine entirely (the playerNoDamage/IsPlayer gate jumps past it), the player should be unaffected - but this one is the least tested: if you also die in one hit, turn THIS mod off alone and report it.",
+            "type": "checkbox",
+            "enabled": false,
+            "memory": [
+                {
+                    "offset": "32D6FD",
+                    "off": "4429E6",
+                    "on": "31F690"
+                }
+            ]
+        },
+        {
+            "name": "Debug menu: open in game (experimental)",
+            "description": "EXPERIMENTAL, NOT TESTED IN GAME. There is no keyboard key for the debug menu on Kyty: the game's only binding is the console shortcut '<command>cp11_toggleDebugMenu = true</command>' in misc\\dsshortcutbuttons.xml, and the emulator's key map (README, section '## Controls') has no slot for it -- not even on a pad, because no L2/R2 and no touch-pad 'click' are exposed either. This mod forces the menu on from the code side, by opening two gates in the per-frame debug-input routine that starts at eboot RVA 0xB2D870 (its only caller is 0xB28798). GATE 1 (0xB2D893): the entire body sits behind 'mov rax,[0x2F782D0] ; cmp byte ptr [rax],1 ; jne 0xb2dccd'. 0x2F782D0 is a bool* in .bss and is NEVER written anywhere in the image -- it was meant to be filled in when the game connects to the Bluepoint tools host (see misc\\gamecommandlineargs.txt, the '+[PS5][!RetailBuild]LoadCmdsFromFile=/devlog/app/BPLastToolsHost.txt inline=true' line), so in a package build with no editor attached the whole routine is dead code. The 16 bytes 0xB2D893-0xB2D8A2 are replaced with NOPs, which both removes the test and removes the null-pointer dereference. GATE 2 (the menu's own on/off latch): the menu's visibility is fed to the debug-menu object's vtable slot +0x18 (0xB97EF0, whose tail is 'mov byte ptr [obj+8], sil' via 0x828920) with sil taken from r15b. r15b is computed at 0xB2D97E / 0xB2D983 / 0xB2D99F from the pad-shortcut state; all three are rewritten to 'mov r15b,1', so the object's enabled byte is pinned at 1 every frame. That also satisfies the later 'or r12b, r15b ; je 0xb2dc2b' at 0xB2DBEF, which is what actually skips the draw call. The first entry is the routine's 20-byte prologue written back unchanged: it doubles as the file's strongest match anchor whenever this mod is enabled. If the emulator crashes, or the menu still does not appear, switch this mod off again and note which of the two happened -- both outcomes are informative (the remaining blockers would then be the object graph the routine walks before 0xB2D942, or the missing menu data).",
+            "type": "checkbox",
+            "enabled": false,
+            "memory": [
+                {
+                    "offset": "B2D870",
+                    "off": "554889e54157415641554154534881ecc8000000",
+                    "on": "554889e54157415641554154534881ecc8000000"
+                },
+                {
+                    "offset": "B2D893",
+                    "off": "488b0536aa44028038010f852a040000",
+                    "on": "90909090909090909090909090909090"
+                },
+                {
+                    "offset": "B2D97E",
+                    "off": "4189c7",
+                    "on": "41b701"
+                },
+                {
+                    "offset": "B2D983",
+                    "off": "4520e7",
+                    "on": "41b701"
+                },
+                {
+                    "offset": "B2D99F",
+                    "off": "4180f701",
+                    "on": "41b70190"
+                }
+            ]
+        },
+        {
+            "name": "Dev build flags: RetailBuild off (experimental)",
+            "description": "EXPERIMENTAL. Makes the engine's own 'RetailBuild' qualifier answer false, which switches on every '+[!RetailBuild]...' line of the game's configuration. The one that matters for the debug menu is misc\\gamecommandlineargs.txt line 6: '+[!Tools][!RetailBuild]LoadCmdsFromFile=$/misc/DebugMenu.txt' -- that file is what defines the debug menu items ('Toggle DS Debug Menu', 'ToggleDebugCamera', the Quicksave submenu, the !DemoMode submenu). Three more lines become active with it: the '$/misc/DSPointsOfInterest.txt' and '$/misc/GameAppPointsOfInterest.txt' loads and '[DemonsSoul][!RetailBuild]cp11_summoning_level_based=false'. The qualifier lookup table lives at 0x816880 and the RetailBuild case at 0x816884 is 'call 0x8469c0 ; test byte ptr [rax],2 ; sete al', i.e. RetailBuild = !(flags & 2). Those 16 bytes become 'xor eax,eax' + 9 NOPs + the original jump to the shared epilogue at 0x8166b0, so the qualifier now always returns false. NOTE this only makes the menu DATA load -- it does not by itself give the menu an input entry point, so pair it with 'Debug menu: open in game'. Also note that the sibling qualifiers are not affected: 'shipping' and 'ps5' are hard-coded true in this build, while 'tools', 'debug' and 'release' are hard-coded false; the 'Tools'/'RetailBuild' combination that gates DebugMenu.txt is therefore blocked by RetailBuild alone. The first entry is 15 bytes of the untouched RetailBuild string comparison written back unchanged, used as this mod's anchor.",
+            "type": "checkbox",
+            "enabled": false,
+            "memory": [
+                {
+                    "offset": "816868",
+                    "off": "ba0b0000004c89f7488d35b0bbc601",
+                    "on": "ba0b0000004c89f7488d35b0bbc601"
+                },
+                {
+                    "offset": "816884",
+                    "off": "e837010300f600020f94c0e91cfeffff",
+                    "on": "31c0909090909090909090e91cfeffff"
+                }
+            ]
+        }
+    ],
+    "credits": [
+        "Patch sites reverse-engineered for KytyPS5 / Demon's Souls PPSA01341 01.007.000 by static analysis of the game's decrypted eboot.bin. No public 01.007.000 cheats exist (only 01.004.000 / 01.005.000, which do not line up).",
+        "The HP / revive / stamina-action / MP mods drive the game's own debug switches (cp11_characters_playerNoDamage / playerNoDead / playerNoStaminaConsume) instead of touching raw stat values, so they stay consistent with the game's own logic.",
+        "2026-10-16 rework: 'Max Souls' and 'No Souls Loss On Death' both patched the single store at 0x203593, and the emulator applies the flat write list in mod order (last wins), so the NOPs of 'No Souls Loss On Death' were overwriting the Max Souls value and neither worked. They are merged into one mod writing the game's own cap constant (999,999,999) there. 'Infinite Stamina' gained the sprint-drain site 0x3261FF, which the debug toggle never covered."
+    ]
+}

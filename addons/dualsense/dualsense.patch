@@ -1,0 +1,697 @@
+diff --git a/src/libs/audio.cpp b/src/libs/audio.cpp
+index 390876b..9c14da9 100644
+--- a/src/libs/audio.cpp
++++ b/src/libs/audio.cpp
+@@ -10,6 +10,8 @@
+ #include "kernel/pthread.h"
+ #include "kernel/semaphore.h"
+ #include "libs/audio_internal.h"
++#include "libs/controller.h"
++#include "libs/dualSenseHaptics.h"
+ #include "libs/errno.h"
+ #include "libs/libs.h"
+ 
+@@ -109,6 +111,10 @@ private:
+ 
+ 		SDL_AudioDeviceID audio_device = 0;
+ 		SDL_AudioSpec     audio_spec   = {};
++
++		// A DualSense can play this port itself: its pad speaker, or its haptic actuators. Null when
++		// no DualSense took it, in which case the main output above plays it.
++		Controller::DualSenseHaptics::Stream* haptics = nullptr;
+ 	};
+ 
+ 	struct PortIn {
+@@ -265,6 +271,9 @@ bool Audio::OpenSdlDevice(PortOut* port) {
+ void Audio::CloseSdlDevice(PortOut* port) {
+ 	EXIT_IF(port == nullptr);
+ 
++	Controller::DualSenseHaptics::Close(port->haptics);
++	port->haptics = nullptr;
++
+ 	if (port->audio_device != 0 && SDL_WasInit(SDL_INIT_AUDIO) != 0) {
+ 		SDL_ClearQueuedAudio(port->audio_device);
+ 		SDL_CloseAudioDevice(port->audio_device);
+@@ -494,6 +503,19 @@ Audio::Id Audio::AudioOutOpen(int type, uint32_t samples_num, uint32_t freq, For
+ 				OpenSdlDevice(&port);
+ 			}
+ 
++			// The pad speaker and the haptic actuators are fed by their own DualSense streams. A
++			// pad speaker port keeps the main output as well and falls back to it when no DualSense
++			// takes the audio; a vibration port has no other way to be heard.
++			if (type == AUDIO_OUT_PORT_TYPE_VIBRATION || type == AUDIO_OUT_PORT_TYPE_PADSPK) {
++				port.haptics =
++				    Controller::DualSenseHaptics::Open(freq, type == AUDIO_OUT_PORT_TYPE_PADSPK);
++			}
++
++			LOGF("AudioOut: output port %d open (%d Hz, %u frames, %d ch); main output %s, DualSense "
++			     "stream %s\n",
++			     id + 1, freq, samples_num, port.channels_num,
++			     port.audio_device != 0 ? "open" : "none", port.haptics != nullptr ? "created" : "none");
++
+ 			return Id::Create(id);
+ 		}
+ 	}
+@@ -602,7 +624,24 @@ uint32_t Audio::AudioOutOutputs(OutputParam* params, uint32_t num, bool blocking
+ 	for (uint32_t i = 0; i < num; i++) {
+ 		auto& port = m_out_ports[params[i].handle.GetId()];
+ 
+-		QueueSdlAudio(&port, params[i].data, blocking);
++		// A wired DualSense plays the pad speaker and the haptic actuators itself, over its own USB
++		// audio endpoint. Only what it does not take goes to the main output: a pad speaker port
++		// keeps its SDL device as a fallback, a vibration port is simply dropped.
++		bool taken_by_controller = false;
++		if (port.haptics != nullptr) {
++			// Evaluated before the lock so the haptics lock is never taken while holding the controller
++			// one; the port lock keeps a concurrent AudioOutClose from freeing the stream under us.
++			const int controller = Controller::GetActiveControllerId();
++
++			Common::LockGuard lock(m_mutex);
++			taken_by_controller  = Controller::DualSenseHaptics::Queue(
++			    port.haptics, controller, params[i].data, port.samples_num,
++			    static_cast<uint32_t>(port.channels_num), FormatIsFloat(port.format), port.volume) != 0;
++		}
++
++		if (!taken_by_controller) {
++			QueueSdlAudio(&port, params[i].data, blocking);
++		}
+ 	}
+ 
+ 	for (uint32_t i = 0; i < num; i++) {
+diff --git a/src/libs/controller.cpp b/src/libs/controller.cpp
+index aa96ed9..890652f 100644
+--- a/src/libs/controller.cpp
++++ b/src/libs/controller.cpp
+@@ -8,6 +8,7 @@
+ #include "common/stringUtils.h"
+ #include "common/threads.h"
+ #include "kernel/pthread.h"
++#include "libs/dualSenseHaptics.h"
+ #include "libs/errno.h"
+ #include "libs/libs.h"
+ #include "libs/padData.h"
+@@ -107,6 +108,7 @@ public:
+ 	void ResetInputState();
+ 	void ReleaseHostPads();
+ 	void GetConnectionInfo(bool* flag, int* count);
++	int  GetActiveControllerId();
+ 	void SetVibration(uint8_t large_motor, uint8_t small_motor);
+ 	void SetLightBar(uint8_t r, uint8_t g, uint8_t b);
+ 	bool SetTriggerEffect(const PadTriggerEffectParam& param);
+@@ -134,6 +136,11 @@ private:
+ 
+ static GameController* g_controller = nullptr;
+ 
++// The instance id of the pad the game drives, or -1/HOST_INPUT_CONTROLLER_ID when there is none.
++int GetActiveControllerId() {
++	return g_controller != nullptr ? g_controller->GetActiveControllerId() : -1;
++}
++
+ // SetScriptedInput's values; `until` (steady clock ns, 0: none) is written last.
+ struct ScriptedInput {
+ 	std::atomic<int64_t>                until {0};
+@@ -280,6 +287,8 @@ void Shutdown() {
+ 	EmergencyShutdown();
+ 	delete g_controller;
+ 	g_controller = nullptr;
++
++	DualSenseHaptics::Shutdown();
+ }
+ 
+ void EmergencyShutdown() {
+@@ -469,9 +478,21 @@ void GameController::ReleaseHostPads() {
+ 	m_connected_ids.clear();
+ }
+ 
++int GameController::GetActiveControllerId() {
++	Common::LockGuard lock(m_mutex);
++	return m_active_id;
++}
++
+ void GameController::SetVibration(uint8_t large_motor, uint8_t small_motor) {
+ 	Common::LockGuard lock(m_mutex);
+ 
++	// A wired DualSense takes rumble through its USB audio endpoint (the actuators), the same path the
++	// game's own haptics use. Driving SDL's HIDAPI rumble output report at the same time makes the two
++	// overwrite each other, so it is only used when no controller audio stream claimed the pad.
++	if (DualSenseHaptics::SetVibration(m_active_id, large_motor, small_motor, RUMBLE_DURATION_MS)) {
++		return;
++	}
++
+ 	if (m_active_id == HOST_INPUT_CONTROLLER_ID) {
+ 		return;
+ 	}
+diff --git a/src/libs/controller.h b/src/libs/controller.h
+index 547d243..ff33633 100644
+--- a/src/libs/controller.h
++++ b/src/libs/controller.h
+@@ -74,6 +74,10 @@ void ResetInputState();
+ // centre; -1: the host's) and these buttons OR-ed into the host's.
+ void SetScriptedInput(int left_x, int left_y, int right_x, int right_y, uint32_t buttons, double seconds);
+ 
++// The SDL instance id of the pad the game is driving, or a non-positive value when none is active.
++// Controller audio streams use it to bind to the same pad the game's haptics belong to.
++int GetActiveControllerId();
++
+ int KYTY_SYSV_ABI PadInit();
+ int KYTY_SYSV_ABI PadOpen(int user_id, int type, int index, const void* param);
+ int KYTY_SYSV_ABI PadGetHandle(int user_id, int type, int index);
+diff --git a/src/libs/dualSenseHaptics.cpp b/src/libs/dualSenseHaptics.cpp
+new file mode 100644
+index 0000000..0c68fc5
+--- /dev/null
++++ b/src/libs/dualSenseHaptics.cpp
+@@ -0,0 +1,497 @@
++// DualSense controller audio: the pad speaker and the haptic actuators get their own audio, sent to
++// the DualSense's USB audio endpoint (four channels: front pair headphones/speaker, back pair the
++// actuators). The PS5 API exposes them as AUDIO_OUT_PORT_TYPE_PADSPK and AUDIO_OUT_PORT_TYPE_VIBRATION
++// ports; in games such as Demon's Souls the vibration port carries the high fidelity haptics.
++//
++// This is the SDL2 port of the upstream KytyPS5 / U59 backend. Only the wired path is implemented:
++// a Bluetooth DualSense has no audio endpoint SDL can write haptics to (upstream encodes them to
++// Opus and sends them over the HID link), so wireless pads keep the classic SDL rumble path.
++
++#include "libs/dualSenseHaptics.h"
++
++#include "common/logging/log.h"
++#include "common/threads.h"
++
++#include "SDL.h"
++
++#include <algorithm>
++#include <array>
++#include <atomic>
++#include <cctype>
++#include <cmath>
++#include <cstring>
++#include <map>
++#include <string>
++#include <vector>
++
++namespace Libs::Controller::DualSenseHaptics {
++
++struct Stream {
++	uint32_t           freq       = 0;
++	bool               speaker    = false;
++	int                controller = -1;
++	SDL_AudioDeviceID  device     = 0;
++	std::string        device_name;
++	uint64_t           next_check = 0;
++	std::vector<float> buffer;
++};
++
++namespace {
++
++constexpr int      FRAME_BYTES  = 4 * sizeof(float);
++constexpr uint32_t MAX_QUEUE_MS = 80;
++
++// Sony's vendor id and the DualSense / DualSense Edge product ids.
++constexpr uint16_t SONY_VENDOR        = 0x054c;
++constexpr uint16_t DUALSENSE_PID      = 0x0ce6;
++constexpr uint16_t DUALSENSE_EDGE_PID = 0x0df2;
++
++Common::Mutex      g_mutex;
++int                g_controller      = -1;
++int                g_haptics_streams = 0;
++uint8_t            g_large_motor = 0, g_small_motor = 0;
++uint64_t           g_rumble_until = 0, g_haptics_until = 0;
++int                g_speaker_controller = -1;
++std::map<int, int> g_speaker_streams;
++
++// Where pad speaker and vibration audio goes, for the console diagnostics: printed when it changes,
++// per port kind, so a 2-second device recheck does not repeat it.
++enum class Route { Unknown, NoWiredPad, NoUsbDevice, Usb, UsbFailed };
++std::atomic<Route> g_reported_route[2] {Route::Unknown, Route::Unknown};
++
++// SDL2's string helpers have no SDL_strcasestr; this is the same "contains, ignoring case" test the
++// device name match needs.
++bool ContainsNoCase(const char* text, const char* needle) {
++	if (text == nullptr || needle == nullptr) {
++		return false;
++	}
++	const size_t needle_len = std::strlen(needle);
++	if (needle_len == 0) {
++		return true;
++	}
++	for (const char* p = text; *p != '\0'; p++) {
++		size_t i = 0;
++		while (i < needle_len && p[i] != '\0' &&
++		       std::tolower(static_cast<unsigned char>(p[i])) ==
++		           std::tolower(static_cast<unsigned char>(needle[i]))) {
++			i++;
++		}
++		if (i == needle_len) {
++			return true;
++		}
++	}
++	return false;
++}
++
++void ReportRoute(const Stream* stream, Route route, const char* detail) {
++	auto& reported = g_reported_route[stream->speaker ? 1 : 0];
++	if (reported.exchange(route) == route) {
++		return;
++	}
++	const char* text = "unknown";
++	switch (route) {
++		case Route::NoWiredPad: text = "no wired DualSense; not played"; break;
++		case Route::NoUsbDevice:
++			text = "wired DualSense, but no 4-channel 'Wireless Controller' audio device";
++			break;
++		case Route::Usb: text = "USB audio device"; break;
++		case Route::UsbFailed: text = "USB audio device failed to open"; break;
++		case Route::Unknown: break;
++	}
++	LOGF("DualSense %s audio (controller %d, %u Hz): %s%s%s\n",
++	     stream->speaker ? "speaker" : "vibration", stream->controller, stream->freq, text,
++	     detail != nullptr ? ": " : "", detail != nullptr ? detail : "");
++}
++
++SDL_GameControllerType TypeOf(int controller) {
++	SDL_LockJoysticks();
++	auto*      pad  = SDL_GameControllerFromInstanceID(static_cast<SDL_JoystickID>(controller));
++	const auto type = pad != nullptr ? SDL_GameControllerGetType(pad) : SDL_CONTROLLER_TYPE_UNKNOWN;
++	SDL_UnlockJoysticks();
++	return type;
++}
++
++void ApplyRumble(bool force = false) { // Caller holds g_mutex; no calls into Audio or Controller.
++	SDL_LockJoysticks();
++	if (auto* pad = SDL_GameControllerFromInstanceID(static_cast<SDL_JoystickID>(g_controller));
++	    pad != nullptr) {
++		const auto now   = SDL_GetTicks();
++		const bool muted = g_haptics_until > now || g_rumble_until <= now;
++		if (force && !muted) {
++			// SDL caches motor strengths. Force a report after raw speaker routing changed the
++			// controller's motor mode without changing that cache.
++			(void)SDL_GameControllerRumble(pad, 0, 0, 0);
++		}
++		(void)SDL_GameControllerRumble(
++		    pad, muted ? 0 : static_cast<uint16_t>(g_large_motor * 0x101U),
++		    muted ? 0 : static_cast<uint16_t>(g_small_motor * 0x101U),
++		    g_rumble_until > now ? static_cast<uint32_t>(g_rumble_until - now) : 0);
++	}
++	SDL_UnlockJoysticks();
++}
++
++void SelectController(int controller) {
++	if (g_controller != controller) {
++		g_haptics_until = g_rumble_until = 0;
++		ApplyRumble();
++		g_controller  = controller;
++		g_large_motor = g_small_motor = 0;
++	}
++}
++
++bool RouteSpeaker(int controller, bool speaker) { // Caller holds g_mutex.
++	// Route the right channel to the speaker and mute the headphones with the values Linux uses
++	// without headphones (output report 0x02). Plugged-in headphones are not checked.
++	// SDL2 posts this packet verbatim into DS5EffectsState_t (see SDL_hidapi_ps5.c), so the byte
++	// offsets below are the struct's fields. SDL_GameControllerSendEffect returns 0 on success.
++	std::array<uint8_t, 38> report {};
++	report[0] = 0x80; // Audio control valid
++	if (speaker) {
++		report[0] |= 0x20; // Speaker volume valid
++		report[1]  = 0x80; // Audio control 2 valid
++		report[5]  = 0x64; // Speaker volume
++		report[7]  = 0x30; // Output path: right channel to the speaker, headphones muted
++		report[37] = 0x02; // Speaker preamp +6 dB
++	}
++	bool routed = false;
++	SDL_LockJoysticks();
++	if (auto* pad = SDL_GameControllerFromInstanceID(static_cast<SDL_JoystickID>(controller));
++	    pad != nullptr) {
++		routed = SDL_GameControllerSendEffect(pad, report.data(), static_cast<int>(report.size())) == 0;
++	}
++	SDL_UnlockJoysticks();
++	if (routed && controller == g_controller) {
++		ApplyRumble(true);
++	}
++	return routed;
++}
++
++bool SelectSpeaker(int controller) { // Caller holds g_mutex; -1 restores headphone routing.
++	if (g_speaker_controller == controller) {
++		return true;
++	}
++	if (g_speaker_controller != -1) {
++		RouteSpeaker(g_speaker_controller, false);
++	}
++	g_speaker_controller = -1;
++	if (controller != -1 && !RouteSpeaker(controller, true)) {
++		return false;
++	}
++	g_speaker_controller = controller;
++	return true;
++}
++
++// The stream counts happen here, and stream->device is only set once everything below succeeded, so
++// the decrements this makes always match an earlier increment.
++void CloseDevice(Stream* stream) {
++	const bool had_device = stream->device != 0;
++	if (had_device) {
++		SDL_CloseAudioDevice(stream->device);
++		stream->device = 0;
++	}
++	stream->device_name.clear();
++	if (had_device) {
++		Common::LockGuard lock(g_mutex);
++		if (!stream->speaker && --g_haptics_streams == 0 && g_haptics_until != 0) {
++			g_haptics_until = 0;
++			ApplyRumble();
++		}
++		// Route back to the headphones once no speaker port plays on the controller.
++		if (stream->speaker) {
++			const auto it = g_speaker_streams.find(stream->controller);
++			if (it != g_speaker_streams.end() && --it->second == 0) {
++				g_speaker_streams.erase(it);
++				if (g_speaker_controller == stream->controller) {
++					SelectSpeaker(-1);
++				}
++			}
++		}
++	}
++}
++
++bool IsDualSenseDevice(int device_index) {
++	const auto vendor  = SDL_JoystickGetDeviceVendor(device_index);
++	const auto product = SDL_JoystickGetDeviceProduct(device_index);
++	return vendor == SONY_VENDOR && (product == DUALSENSE_PID || product == DUALSENSE_EDGE_PID);
++}
++
++bool CanUseDevice(int controller) {
++	// SDL exposes no portable association between a gamepad and its USB audio endpoint.
++	// Require one DualSense; guessing with multiple pads could play on the wrong one.
++	SDL_LockJoysticks();
++	const int count          = SDL_NumJoysticks();
++	int       total          = 0;
++	bool      has_controller = false;
++	for (int i = 0; i < count; i++) {
++		if (!IsDualSenseDevice(i)) {
++			continue;
++		}
++		total++;
++		if (SDL_JoystickGetDeviceInstanceID(i) == static_cast<SDL_JoystickID>(controller)) {
++			has_controller = true;
++		}
++	}
++	SDL_UnlockJoysticks();
++	return has_controller && total == 1;
++}
++
++// The index and name of the one quad-channel DualSense endpoint, or -1.
++int FindDevice(std::string* name_out) {
++	const int count = SDL_GetNumAudioDevices(0);
++	int       found = -1;
++	for (int i = 0; i < count; i++) {
++		const char* name = SDL_GetAudioDeviceName(i, 0);
++		if (name == nullptr ||
++		    (!ContainsNoCase(name, "DualSense") && !ContainsNoCase(name, "Wireless Controller"))) {
++			continue;
++		}
++		SDL_AudioSpec spec {};
++		if (SDL_GetAudioDeviceSpec(i, 0, &spec) != 0 || spec.channels != 4) {
++			continue;
++		}
++		if (found >= 0) {
++			return -1; // Multiple matching endpoints cannot be associated reliably either.
++		}
++		found = i;
++		if (name_out != nullptr) {
++			*name_out = name;
++		}
++	}
++	return found;
++}
++
++SDL_AudioDeviceID OpenDevice(const std::string& name, uint32_t freq) {
++	SDL_AudioSpec desired {};
++	desired.freq     = static_cast<int>(freq);
++	desired.format   = AUDIO_F32SYS;
++	desired.channels = 4;
++	desired.samples  = 1024;
++	desired.callback = nullptr; // Queued audio (SDL_QueueAudio) requires a null callback.
++
++	SDL_AudioSpec     obtained {};
++	SDL_AudioDeviceID device =
++	    SDL_OpenAudioDevice(name.c_str(), 0, &desired, &obtained, SDL_AUDIO_ALLOW_ANY_CHANGE);
++	if (device == 0) {
++		LOGF("DualSenseHaptics: cannot open quad output: %s\n", SDL_GetError());
++		return 0;
++	}
++	if (obtained.channels != 4) {
++		SDL_CloseAudioDevice(device);
++		LOGF("DualSenseHaptics: '%s' has %d channels, not 4\n", name.c_str(), obtained.channels);
++		return 0;
++	}
++	SDL_PauseAudioDevice(device, 0);
++	return device;
++}
++
++void RefreshDevice(Stream* stream, int controller) {
++	if (stream->controller != controller) {
++		CloseDevice(stream);
++		stream->controller = controller;
++		stream->next_check = 0;
++	}
++	const auto now = SDL_GetTicks();
++	if (stream->device != 0 && now < stream->next_check) {
++		return;
++	}
++	stream->next_check = now + 2000;
++
++	std::string name;
++	const int   index = FindDevice(&name);
++	if (index < 0) {
++		CloseDevice(stream);
++		ReportRoute(stream, Route::NoUsbDevice, nullptr);
++		return;
++	}
++	if (stream->device != 0 && stream->device_name == name) {
++		return; // The endpoint we already hold is still the one.
++	}
++	CloseDevice(stream);
++
++	auto device = OpenDevice(name, stream->freq);
++	if (device == 0) {
++		ReportRoute(stream, Route::UsbFailed, SDL_GetError());
++		return;
++	}
++
++	bool ready;
++	{
++		Common::LockGuard lock(g_mutex);
++		if (stream->speaker) {
++			ready = SelectSpeaker(controller);
++			if (ready) {
++				g_speaker_streams[controller]++;
++			}
++		} else {
++			g_haptics_streams++;
++			ready = true;
++		}
++	}
++	if (!ready) {
++		SDL_CloseAudioDevice(device);
++		return;
++	}
++
++	stream->device      = device;
++	stream->device_name = name;
++	ReportRoute(stream, Route::Usb, name.c_str());
++}
++
++uint64_t QueueUsbAudio(Stream* stream, uint32_t frames) {
++	const auto queued    = static_cast<int64_t>(SDL_GetQueuedAudioSize(stream->device));
++	const auto bytes     = static_cast<int64_t>(frames) * FRAME_BYTES;
++	const auto max_bytes = static_cast<int64_t>(stream->freq) * FRAME_BYTES * MAX_QUEUE_MS / 1000;
++	if (queued + bytes > max_bytes) {
++		// Keep the newest sound after a brief device stall. Dropping the oldest audio in chunks
++		// avoids the much longer gap a full clear produces.
++		std::array<uint8_t, 16384> discarded {};
++		auto                       left = queued + bytes - max_bytes;
++		while (left > 0) {
++			const auto chunk = std::min<int64_t>(left, static_cast<int64_t>(discarded.size()));
++			if (SDL_DequeueAudio(stream->device, discarded.data(), static_cast<uint32_t>(chunk)) == 0) {
++				break;
++			}
++			left -= chunk;
++		}
++		if (static_cast<int64_t>(SDL_GetQueuedAudioSize(stream->device)) + bytes > max_bytes) {
++			SDL_ClearQueuedAudio(stream->device);
++		}
++	}
++	if (SDL_QueueAudio(stream->device, stream->buffer.data(), static_cast<uint32_t>(bytes)) < 0) {
++		LOGF("DualSenseHaptics: SDL_QueueAudio failed: %s\n", SDL_GetError());
++		return 0;
++	}
++	return static_cast<uint64_t>(SDL_GetQueuedAudioSize(stream->device)) * 1000000 /
++	       (stream->freq * FRAME_BYTES);
++}
++
++// The actuators are the same voice coils SDL rumble drives, so a rumble set while haptics play is
++// suppressed until they stop. Games call SetVibration and queue haptics continuously, so this
++// end-of-haptics tick runs often enough without an audio callback (SDL_QueueAudio forbids one).
++void TickHaptics() { // Caller holds g_mutex.
++	if (g_haptics_until != 0 && SDL_GetTicks() >= g_haptics_until) {
++		g_haptics_until = 0;
++		ApplyRumble();
++	}
++}
++
++} // namespace
++
++Stream* Open(uint32_t freq, bool speaker) {
++	if (freq == 0 || SDL_InitSubSystem(SDL_INIT_AUDIO) < 0) {
++		return nullptr;
++	}
++	return new Stream {.freq = freq, .speaker = speaker};
++}
++
++void Close(Stream* stream) {
++	if (stream != nullptr) {
++		CloseDevice(stream);
++		delete stream;
++		// The audio subsystem is left initialized: libAudio's own SDL devices use it, and SDL_QuitSubSystem
++		// here could tear it down under them.
++	}
++}
++
++bool UsesBluetooth(const Stream* stream) {
++	(void)stream;
++	return false;
++}
++
++uint64_t Queue(Stream* stream, int controller, const void* data, uint32_t frames, uint32_t channels,
++               bool is_float, const int* volume, float gain) {
++	if (stream == nullptr || data == nullptr || frames == 0 || channels == 0 || volume == nullptr) {
++		return 0;
++	}
++	const auto max_frames =
++	    static_cast<uint32_t>(static_cast<uint64_t>(stream->freq) * MAX_QUEUE_MS / 1000);
++	const auto first_frame = frames > max_frames ? frames - max_frames : 0;
++	frames -= first_frame;
++	if (frames == 0) {
++		return 0;
++	}
++
++	if (TypeOf(controller) != SDL_CONTROLLER_TYPE_PS5 || !CanUseDevice(controller)) {
++		CloseDevice(stream);
++		stream->next_check = 0; // Look for the device as soon as a DualSense is active again.
++		ReportRoute(stream, Route::NoWiredPad, nullptr);
++		Common::LockGuard lock(g_mutex);
++		TickHaptics();
++		return 0;
++	}
++	RefreshDevice(stream, controller);
++	if (stream->device == 0) {
++		Common::LockGuard lock(g_mutex);
++		TickHaptics();
++		return 0;
++	}
++	if (stream->speaker) {
++		bool routed;
++		{
++			Common::LockGuard lock(g_mutex);
++			routed = SelectSpeaker(controller);
++		}
++		if (!routed) {
++			CloseDevice(stream);
++			return 0;
++		}
++	}
++
++	// USB places the speaker in front and the actuators in back, so a vibration port writes the back
++	// pair and a speaker port the front pair.
++	const uint32_t output_channels = 4;
++	const uint32_t channel_offset  = stream->speaker ? 0 : 2;
++	stream->buffer.assign(static_cast<size_t>(frames) * output_channels, 0.0f);
++	bool audible = false;
++	for (uint32_t frame = 0; frame < frames; frame++) {
++		for (uint32_t ch = 0; ch < 2; ch++) {
++			const auto src_ch = channels == 1 ? 0 : ch;
++			const auto index  = (static_cast<size_t>(first_frame) + frame) * channels + src_ch;
++			float      value  = is_float ? static_cast<const float*>(data)[index]
++			                             : static_cast<const int16_t*>(data)[index] / 32768.0f;
++			value *= volume[src_ch] / 32768.0f * gain;
++			stream->buffer[static_cast<size_t>(frame) * output_channels + ch + channel_offset] = value;
++			audible |= std::isfinite(value) && std::fabs(value) > 1.0f / 1024;
++		}
++	}
++
++	const auto queued_us = QueueUsbAudio(stream, frames);
++	if (queued_us == 0) {
++		CloseDevice(stream);
++		stream->next_check = SDL_GetTicks() + 2000;
++		return 0;
++	}
++	if (audible && !stream->speaker) {
++		Common::LockGuard lock(g_mutex);
++		SelectController(controller);
++		const auto now      = SDL_GetTicks();
++		const bool starting = g_haptics_until <= now;
++		g_haptics_until = std::max(g_haptics_until, now + std::max<uint64_t>(queued_us / 1000, 250));
++		if (starting) {
++			ApplyRumble();
++		}
++	}
++	return queued_us;
++}
++
++bool SetVibration(int controller, uint8_t large_motor, uint8_t small_motor, uint32_t duration_ms) {
++	if (TypeOf(controller) != SDL_CONTROLLER_TYPE_PS5) {
++		return false;
++	}
++	Common::LockGuard lock(g_mutex);
++	SelectController(controller);
++	TickHaptics();
++	g_large_motor  = large_motor;
++	g_small_motor  = small_motor;
++	g_rumble_until = SDL_GetTicks() + duration_ms;
++	ApplyRumble();
++	return true;
++}
++
++void Shutdown() {
++	Common::LockGuard lock(g_mutex);
++	SelectController(-1);
++	SelectSpeaker(-1);
++}
++
++} // namespace Libs::Controller::DualSenseHaptics
+diff --git a/src/libs/dualSenseHaptics.h b/src/libs/dualSenseHaptics.h
+new file mode 100644
+index 0000000..83c2d87
+--- /dev/null
++++ b/src/libs/dualSenseHaptics.h
+@@ -0,0 +1,30 @@
++#ifndef EMULATOR_INCLUDE_EMULATOR_DUALSENSE_HAPTICS_H_
++#define EMULATOR_INCLUDE_EMULATOR_DUALSENSE_HAPTICS_H_
++
++#include <cstdint>
++
++namespace Libs::Controller::DualSenseHaptics {
++
++struct Stream;
++
++// A speaker stream plays a pad speaker port and routes the speaker to it; the others play vibration
++// ports on the actuators.
++Stream* Open(uint32_t freq, bool speaker);
++void    Close(Stream* stream);
++// Always false here: controller audio only plays on a wired DualSense, whose USB audio endpoint is
++// used. (Kept so callers stay source-compatible with the Bluetooth path.)
++bool UsesBluetooth(const Stream* stream);
++// Returns how long the queued audio still plays, in microseconds, or 0 when no DualSense took it
++// (the active pad has no usable controller audio device or its speaker cannot be routed).
++// Ambiguous USB endpoints are not selected.
++uint64_t Queue(Stream* stream, int controller, const void* data, uint32_t frames, uint32_t channels,
++               bool is_float, const int* volume, float gain = 1.0f);
++// Returns false for other gamepad types, which retain the normal rumble path.
++bool SetVibration(int controller, uint8_t large_motor, uint8_t small_motor,
++                  uint32_t duration_ms = 0xffff);
++// Also restores the headphone routing.
++void Shutdown();
++
++} // namespace Libs::Controller::DualSenseHaptics
++
++#endif // EMULATOR_INCLUDE_EMULATOR_DUALSENSE_HAPTICS_H_
