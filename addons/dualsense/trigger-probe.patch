@@ -1,0 +1,301 @@
+diff --git a/src/graphics/presentation/window/window.cpp b/src/graphics/presentation/window/window.cpp
+index 207a6d7..cbec2ea 100644
+--- a/src/graphics/presentation/window/window.cpp
++++ b/src/graphics/presentation/window/window.cpp
+@@ -44,6 +44,7 @@
+ #include "loader/systemContent.h"
+ 
+ #include <algorithm>
++#include <cstdio>
+ #include <cstdlib>
+ #include <fmt/format.h>
+ #include <memory>
+@@ -369,6 +370,16 @@ static void GameEventController([[maybe_unused]] const EventController& f) {
+ 		auto* pad = SDL_GameControllerOpen(f.id);
+ 		EXIT_NOT_IMPLEMENTED(pad == nullptr);
+ 		int id = SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(pad));
++		// The other half of the trigger probe in libs/controller.cpp: the game is told it holds a
++		// DualSense, so the pad that would carry the effect has to be one, and SDL has to believe it can
++		// take trigger effects at all. (printf: the release build keeps LOGF silent.)
++		const char* name = SDL_GameControllerName(pad);
++		std::printf("Pad: host '%s' opened, SDL type %d (%s), rumble triggers %d\n",
++		            name != nullptr ? name : "?", static_cast<int>(SDL_GameControllerGetType(pad)),
++		            SDL_GameControllerGetType(pad) == SDL_CONTROLLER_TYPE_PS5 ? "DualSense"
++		                                                                     : "not a DualSense",
++		            SDL_GameControllerHasRumbleTriggers(pad) == SDL_TRUE ? 1 : 0);
++		std::fflush(stdout);
+ 		Controller::Connect(id);
+ 	}
+ 
+diff --git a/src/libs/controller.cpp b/src/libs/controller.cpp
+index 110bdbd..fa5b620 100644
+--- a/src/libs/controller.cpp
++++ b/src/libs/controller.cpp
+@@ -275,9 +275,108 @@ static bool trigger_effect_to_dualsense(const PadTriggerEffectCommand& command,
+ 	}
+ }
+ 
++namespace {
++
++// ---- trigger effect probe ------------------------------------------------------------------------
++// Demon's Souls carries a trigger preset system of its own (controller_triggerEffectEnable,
++// CPOLdrPadTriggerEffectPreset, SendLeftTrigger) and this port implements scePadSetTriggerEffect, but
++// nothing said whether the game ever calls it and whether the host pad takes the result. These lines
++// answer the two halves apart: "asked" is the game's call, "host"/"send" is what SDL did with it.
++// std::printf, not LOGF: the release build keeps the console's log silent.
++//
++// A game that re-sets an effect every frame would bury the log, so a request identical to the one
++// printed last is only counted, and the probe stops after this many lines.
++constexpr uint32_t TRIGGER_PROBE_MAX = 64;
++
++struct TriggerProbe {
++	uint64_t calls        = 0;
++	uint32_t printed      = 0;
++	uint32_t repeated     = 0;
++	uint32_t last_request = 0xffffffffu;
++	int      last_send    = -999;
++};
++
++TriggerProbe g_trigger_probe;
++
++uint32_t TriggerProbeRequest(const PadTriggerEffectParam& param) {
++	uint32_t   hash = 2166136261u;
++	const auto mix  = [&hash](uint32_t value) { hash = (hash ^ value) * 16777619u; };
++
++	mix(param.trigger_mask);
++	for (const auto& command: param.command) {
++		mix(command.mode);
++		for (const auto value: command.data) {
++			mix(value);
++		}
++	}
++	return hash;
++}
++
++void TriggerProbeCommand(const PadTriggerEffectCommand& command, char* text, size_t size) {
++	std::snprintf(text, size, "mode=%u data=%02x %02x %02x %02x",
++	              static_cast<unsigned>(command.mode), static_cast<unsigned>(command.data[0]),
++	              static_cast<unsigned>(command.data[1]), static_cast<unsigned>(command.data[2]),
++	              static_cast<unsigned>(command.data[3]));
++}
++
++// pad_type: -1 when no host pad is open, otherwise what SDL_GameControllerGetType answers.
++// send: the result of SDL_GameControllerSendEffect, or -999 when nothing was sent at all (no pad, a
++// pad that is not a DualSense, or an effect that never converted).
++void TriggerProbeReport(const PadTriggerEffectParam& param, bool converted, int pad_type, int send) {
++	auto& probe = g_trigger_probe;
++
++	probe.calls++;
++	if (probe.printed >= TRIGGER_PROBE_MAX) {
++		return;
++	}
++	const uint32_t request = TriggerProbeRequest(param);
++	if (request == probe.last_request && send == probe.last_send) {
++		probe.repeated++;
++		return;
++	}
++	probe.last_request = request;
++	probe.last_send    = send;
++	probe.printed++;
++
++	char left[64]  = {};
++	char right[64] = {};
++	char sent[24]  = {};
++	TriggerProbeCommand(param.command[0], left, sizeof(left));
++	TriggerProbeCommand(param.command[1], right, sizeof(right));
++	if (send == -999) {
++		std::snprintf(sent, sizeof(sent), "not sent");
++	} else {
++		std::snprintf(sent, sizeof(sent), "%d", send);
++	}
++	const char* host = "no pad";
++	if (pad_type == SDL_CONTROLLER_TYPE_PS5) {
++		host = "DualSense";
++	} else if (pad_type >= 0) {
++		host = "not a DualSense";
++	}
++
++	std::printf(
++	    "Pad: trigger effect #%llu mask=0x%02x converted=%s host=%s send=%s left[%s] right[%s]\n",
++	    static_cast<unsigned long long>(probe.calls), static_cast<unsigned>(param.trigger_mask),
++	    converted ? "yes" : "no", host, sent, left, right);
++	if (probe.printed == TRIGGER_PROBE_MAX) {
++		std::printf("Pad: trigger effect: %u lines logged, further requests are only counted\n",
++		            TRIGGER_PROBE_MAX);
++	}
++	std::fflush(stdout);
++}
++
++} // namespace
++
+ void Initialize() {
+ 	EXIT_IF(g_controller != nullptr);
+ 
++	// Says the probe is in this build even when the game never calls the function it watches: an empty
++	// log then means "the game did not call it", not "this exe has no probe".
++	std::printf("Pad: trigger effect probe ready (scePadSetTriggerEffect 2JgFB2n9oUM, "
++	            "scePadGetTriggerEffectState znaWI0gpuo8)\n");
++	std::fflush(stdout);
++
+ 	g_controller = new GameController;
+ 	g_controller->Connect(HOST_INPUT_CONTROLLER_ID);
+ }
+@@ -503,24 +602,24 @@ void GameController::SetLightBar(uint8_t r, uint8_t g, uint8_t b) {
+ }
+ 
+ bool GameController::SetTriggerEffect(const PadTriggerEffectParam& param) {
+-	if ((param.trigger_mask & ~0x03u) != 0) {
+-		return false;
+-	}
++	bool converted = (param.trigger_mask & ~0x03u) == 0;
+ 
+ 	DualSenseEffects effect {};
+-	if ((param.trigger_mask & 0x01u) != 0) {
++	if (converted && (param.trigger_mask & 0x01u) != 0) {
+ 		effect.enable_bits |= 0x08;
+-		if (!trigger_effect_to_dualsense(param.command[0], effect.left_trigger)) {
+-			return false;
+-		}
++		converted = trigger_effect_to_dualsense(param.command[0], effect.left_trigger);
+ 	}
+-	if ((param.trigger_mask & 0x02u) != 0) {
++	if (converted && (param.trigger_mask & 0x02u) != 0) {
+ 		effect.enable_bits |= 0x04;
+-		if (!trigger_effect_to_dualsense(param.command[1], effect.right_trigger)) {
+-			return false;
+-		}
++		converted = trigger_effect_to_dualsense(param.command[1], effect.right_trigger);
++	}
++	if (!converted) {
++		TriggerProbeReport(param, false, -1, -999);
++		return false;
+ 	}
+ 	if (effect.enable_bits == 0) {
++		// Mode 0 on every trigger the game named: it is switching the effect off, not setting one.
++		TriggerProbeReport(param, true, -1, -999);
+ 		return true;
+ 	}
+ 
+@@ -528,10 +627,16 @@ bool GameController::SetTriggerEffect(const PadTriggerEffectParam& param) {
+ 	// Remember it for scePadGetTriggerEffectState even when no DualSense takes it: a game that polls
+ 	// the state has to see the effect it asked for, not a zero.
+ 	m_state_effect = param;
+-	auto* pad = SDL_GameControllerFromInstanceID(static_cast<SDL_JoystickID>(m_active_id));
+-	if (pad != nullptr && SDL_GameControllerGetType(pad) == SDL_CONTROLLER_TYPE_PS5) {
+-		(void)SDL_GameControllerSendEffect(pad, &effect, sizeof(effect));
++	auto* pad      = SDL_GameControllerFromInstanceID(static_cast<SDL_JoystickID>(m_active_id));
++	int pad_type   = -1;
++	int send       = -999;
++	if (pad != nullptr) {
++		pad_type = static_cast<int>(SDL_GameControllerGetType(pad));
++		if (pad_type == SDL_CONTROLLER_TYPE_PS5) {
++			send = SDL_GameControllerSendEffect(pad, &effect, sizeof(effect));
++		}
+ 	}
++	TriggerProbeReport(param, true, pad_type, send);
+ 	return true;
+ }
+ 
+@@ -797,7 +902,19 @@ int KYTY_SYSV_ABI PadGetControllerInformation(int handle, PadControllerInformati
+ 	info->connection_type       = 0;
+ 	info->connected_count       = static_cast<uint8_t>(std::min(connected_count, 255));
+ 	info->connected             = connected;
+-	info->device_class          = 0;
++	info->device_class          = 0; // SCE_PAD_DEVICE_CLASS_STANDARD, what a DualSense reports
++
++	// Once: this is what the game is told it is holding before it decides how to drive it. STANDARD (0)
++	// is right for a DualSense, so a game that still skips the trigger effects is not skipping them here.
++	static bool reported = false;
++	if (!reported) {
++		reported = true;
++		std::printf("Pad: controller information asked -> device_class %d (STANDARD), connected %d, "
++		            "count %d\n",
++		            info->device_class, info->connected ? 1 : 0,
++		            static_cast<int>(info->connected_count));
++		std::fflush(stdout);
++	}
+ 
+ 	return OK;
+ }
+@@ -904,10 +1021,26 @@ int KYTY_SYSV_ABI PadSetLightBar(int handle, const PadLightBarParam* param) {
+ int KYTY_SYSV_ABI PadSetTriggerEffect(int handle, const PadTriggerEffectParam* param) {
+ 	PRINT_NAME();
+ 
++	// The two refusals below answer "the game called it" with "and got an error back", which is the one
++	// case the report inside SetTriggerEffect never sees. One line each: a game that is refused would be
++	// refused every frame.
++	static bool refused_handle = false;
++	static bool refused_arg    = false;
++
+ 	if (handle != 1) {
++		if (!refused_handle) {
++			refused_handle = true;
++			std::printf("Pad: scePadSetTriggerEffect refused handle %d (only 1 is opened)\n", handle);
++			std::fflush(stdout);
++		}
+ 		return PAD_ERROR_INVALID_HANDLE;
+ 	}
+ 	if (param == nullptr) {
++		if (!refused_arg) {
++			refused_arg = true;
++			std::printf("Pad: scePadSetTriggerEffect called with a null param\n");
++			std::fflush(stdout);
++		}
+ 		return PAD_ERROR_INVALID_ARG;
+ 	}
+ 
+@@ -928,14 +1061,17 @@ int KYTY_SYSV_ABI PadGetTriggerEffectState(int handle, PadTriggerEffectStateInfo
+ 	info->state[1] = g_controller->GetTriggerEffectState(false);
+ 
+ 	// The first changes, so a log shows whether the game polls this and what it sees (printf: the
+-	// console's LOGF is silent in the release configuration).
+-	static int                    reports = 0;
++	// console's LOGF is silent in the release configuration). The first poll is printed even when it
++	// changes nothing: it tells "never polled" apart from "polled, all zero".
++	static int                    polls = 0;
+ 	static std::array<int32_t, 2> last {-1, -1};
+-	if (reports < 32 && (info->state[0] != last[0] || info->state[1] != last[1])) {
+-		std::printf("Pad: trigger state %d,%d\n", info->state[0], info->state[1]);
++	polls++;
++	if (polls <= 32 && (polls == 1 || info->state[0] != last[0] || info->state[1] != last[1])) {
++		std::printf("Pad: trigger state poll #%d -> left %d, right %d\n", polls, info->state[0],
++		            info->state[1]);
++		std::fflush(stdout);
+ 		last[0] = info->state[0];
+ 		last[1] = info->state[1];
+-		reports++;
+ 	}
+ 	return OK;
+ }
+diff --git a/src/libs/libPad.cpp b/src/libs/libPad.cpp
+index 748ce6c..7bad0f8 100644
+--- a/src/libs/libPad.cpp
++++ b/src/libs/libPad.cpp
+@@ -6,6 +6,7 @@
+ #include "libs/padData.h"
+ #include "loader/symbolDatabase.h"
+ 
++#include <cstdio>
+ #include <cstring>
+ 
+ namespace Libs {
+@@ -119,6 +120,19 @@ static int KYTY_SYSV_ABI PadDeviceClassParseData(int handle, const Controller::P
+ 		std::memcpy(class_data->class_data.others.data, data->device_unique_data, data_len);
+ 	}
+ 
++	// Once, next to the trigger probe in libs/controller.cpp: whether the game asks what kind of pad
++	// this is before it drives it, and what it is told. STANDARD (0) is right for a DualSense, so a
++	// game that skips the trigger effects is not skipping them here. (printf: LOGF is silent in the
++	// release build.)
++	static bool reported = false;
++	if (!reported) {
++		reported = true;
++		std::printf("Pad: device class parsed -> class %d, data_valid %d, unique payload %d byte(s)\n",
++		            class_data->device_class, class_data->data_valid ? 1 : 0,
++		            static_cast<int>(data->device_unique_data_len));
++		std::fflush(stdout);
++	}
++
+ 	return OK;
+ }
+ 

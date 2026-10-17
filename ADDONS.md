@@ -9,8 +9,9 @@ upstream portable Windows build, all of them for **Demon's Souls (PPSA01341)**:
   backend that opens the audio endpoint through `IAudioClient`) is replaced by an SDL2 one that mixes the
   speaker and the actuators by hand, so their volumes are adjustable independently and the two do not cut
   each other off;
-* **the tendency editor** — writes `Tendency_World00..06_*` / `Tendency_Player_*` straight into the save,
-  one world at a time, so changing one world no longer flattens the other six;
+* **the tendency editor** — writes `Tendency_World*_*` / `Tendency_Player_*` straight into the save, one
+  world at a time, so changing one world no longer flattens the others. The save's slot order is **not**
+  the world order — it is `1, 5, 3, 2, 4` — see "Notes on the addons" below for how that was measured;
 * **the cheat file** — eight mods for 01.007.000, four of them on by default, each traced back to the
   routine it patches (see `addons/cheats/README.md`).
 
@@ -63,18 +64,46 @@ copies them onto any release (v20261014 and newer; the optional switches it pass
 | `addons/launcher.ps1` | the launcher: upstream's window plus a `Mods` group (cheats, tendencies, debug menu, controller volumes) |
 | `addons/install.ps1`, `install.cmd` | copies the launcher and the cheats onto a release folder |
 | `addons/cheats/` | the cheat file, `verify_cheat.py` (checks every offset against the game's `eboot.bin`) and its README |
-| `addons/dualsense/` | the SDL2 backend, its patch, and `rebuild.ps1` |
+| `addons/dualsense/` | the SDL2 backend, its patch, `rebuild.ps1`, plus the adaptive-trigger probe (`trigger-probe.patch`, `probe_trigger.exe` and its source) |
 | `addons/NOTES.zh-CN.md` | the engineering notes behind all of it (Chinese: how the save format was worked out, every address, every dead end) |
 | `src/libs/dualSenseHaptics.cpp`, `.h` | the only upstream files this fork changes |
 
-## Notes on the four addons
+## Notes on the addons
 
 **Per-world tendency.** The save stores sixteen floats, nine bytes each, after a `u32 version | u32
 checksum | u32 size | u32` header: `Tendency_Player_BlackWhite`, `_LeftRight`, then
 `Tendency_World00..06_BlackWhite` / `_LeftRight`. The values run −200 (pure black) to +200 (pure white).
-The world numbers are the game's own — 0 Nexus, 1 Boletarian Palace, 2 Stonefang Tunnel, 3 Tower of
-Latria, 4 Shrine of Storms, 5 Valley of Defilement, 6 unused (the numbering jumps 5 → 8, the tutorial is
-world 8). Only the worlds whose box is ticked are written; the rest are left byte for byte alone.
+Only the worlds whose box is ticked are written; the rest are left byte for byte alone.
+
+**Which slot is which world** is the one thing here that could not be read out of the executable. The
+game's own world numbering (0 Nexus, 1 Boletarian Palace, 2 Stonefang Tunnel, 3 Tower of Latria, 4 Shrine
+of Storms, 5 Valley of Defilement, 6 unused — the numbering jumps 5 → 8 and the tutorial is world 8) is
+easy to establish, and every document written from it will tell you that slot *N* holds world *N*. It does
+not. Writing one distinct value into each of the seven slots and reading the game's **Tendency** page back
+gives:
+
+| Slot | `World00` | `World01` | `World02` | `World03` | `World04` | `World05` | `World06` |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| World shown in game | — (Nexus) | 1 Boletarian Palace | **4 Shrine of Storms** | 3 Tower of Latria | 5 Valley of Defilement | **2 Stonefang Tunnel** | — (nothing) |
+
+So the launcher holds the map as `1, 5, 3, 2, 4` and shows five rows, one per world that actually exists,
+in the game's order. `World00` (Nexus, which has no world tendency) and `World06` (the sixth world, whose
+archstone is not reachable in this build) are left out: writing them changes nothing anywhere in the game.
+
+Older versions of this fork wrote slot *N* for world *N*. A settings file from one of those is still read
+correctly — the stored list is seven entries long and is therefore taken as slot order and remapped, while
+a five-entry list is taken as world order.
+
+**Adaptive triggers** need no addon at all: upstream already converts `scePadSetTriggerEffect` through
+`trigger_effect_to_dualsense()` into the 11-byte effect blocks and hands them to SDL, which puts them in a
+USB output report of its own. It works — with the game's trigger effect option on, drawing a bow on a
+DualSense sends `mode 1` (feedback) on the right trigger and releasing sends `mode 0`, 25 times in one
+short session. What it does **not** do is reflect the menu switch: the game's
+`CCPLdrPlatformPadTriggerEffect` component only mirrors that option into a byte and sends a one-off
+"both triggers off" when it changes, so toggling the option in the menu can never be felt. The effect has
+to come from gameplay. `addons/dualsense/trigger-probe.patch` adds `printf` traces to the way in and
+`addons/dualsense/probe_trigger.exe` drives the same effects straight from the host, without the emulator,
+to tell a game-side problem from a controller-side one.
 
 **The debug menu.** There is no key that opens it in this build, and `cp11_toggleDebugMenu` cannot either:
 the game's whole input routine is dead code behind a `bool*` in `.bss` that nothing in the executable

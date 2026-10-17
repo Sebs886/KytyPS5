@@ -53,61 +53,61 @@
 这些控件都在启动器的 **Mods** 分组里，左侧标签是 `Tendency`：
 
 ```
-Tendency   [ ] W0  Nexus                  [-180]    ← 7 个世界，逐个勾、逐个填
-           [ ] W1  Boletarian Palace      [ 120]
-           [ ] W2  Stonefang Tunnel       [   0]
-           [ ] W3  Tower of Latria        [   0]
-           [ ] W4  Shrine of Storms       [   0]
-           [ ] W5  Valley of Defilement   [ 120]
-           [ ] W6  (spare slot)           [   0]
-           [ ] Character tendency         [  60]    the same scale (-200 the dark path, +200 pure white)
-           SAVEDATA0PlayerProfile1 · character 160 · world W0..W6 -180/120/0/0/0/120/0   ← 灰字，开窗现读
+Tendency   [ ] W1  Boletarian Palace    [ 120]    ← 5 个世界，逐个勾、逐个填
+           [ ] W2  Stonefang Tunnel     [ 120]
+           [ ] W3  Tower of Latria      [   0]
+           [ ] W4  Shrine of Storms     [ 200]
+           [ ] W5  Valley of Defilement [   0]
+           [ ] Character tendency       [  60]    the same scale (-200 the dark path, +200 pure white)
+           SAVEDATA0PlayerProfile1 · character 160 · world W1..W5 120/120/0/200/0   ← 灰字，开窗现读
            -200 pure black ... 0 neutral ... +200 pure white; a tick pins that one world ...
            [ ] Show the numbers next to the tendency icons (the game's own readout)
            [ ] Ask for the debug menu at boot (the menu itself comes from the "Debug menu: open in game" cheat)
 ```
 
-**七个世界是分开的**：勾哪个世界才写哪个世界，没勾的一个字节都不碰 —— 所以可以只把
+**每个世界都是分开的**：勾哪个世界才写哪个世界，没勾的一个字节都不碰 —— 所以可以只把
 Boletarian Palace 调成纯白，另外几个世界保持游戏里的原样。勾上的那个世界**每次启动都会被写回**，
 游戏里挣来的变化下次启动就被覆盖（这就是"钉住"的意思）；不想钉了把勾去掉即可。
 
-数字框 **-200 ~ +200 的整数**、步进 20，也可以直接输入。**开窗时七个框会自动填成存档里的现值**，
+数字框 **-200 ~ +200 的整数**、步进 20，也可以直接输入。**开窗时五个框会自动填成存档里的现值**，
 所以第一次打开就能看到游戏现在到底是什么状态，改起来只需要动要动的那一个。
-**灰字那一行**写的是用的是哪个角色档、人物倾向多少、7 个世界各多少，同样是开窗时从存档现读的。
+**灰字那一行**写的是用的是哪个角色档、人物倾向多少、5 个世界各多少，同样是开窗时从存档现读的。
 
-### 七个槽分别对应哪个世界（编号是游戏自己的）
+### 世界 → 存档槽：**这张表是实测出来的，不是按顺序推的**
 
-编号和名字都不是我们起的，是游戏自己的说法 —— 四条互不相干的线索：
+⚠️ 这一节在 2026-10-17 晚**被推翻重写过一次**。旧版本按"存档槽 N = 世界 N"直接对应，
+结果把 4 写进了世界 2 的框、游戏里却是**世界 4**亮了 —— 因为**存档槽号和世界编号根本不是一回事**。
 
-* **游戏自己的传送数据**（最直接的一条）：`misc/dspointsofinterest.txt` 里每个 NPC 都写成
-  `script="$/scripts/worlds/m0X_00_00_00/…"` + `command="+cp11_loadLevel <世界> <区域>"`，
-  两列一一对上：
+做法：给 7 个槽各写一个**互不相同**的数（10/40/70/100/130/160/190），进游戏 Tendency 页逐个读回来：
 
-  | 地图文件组 | `cp11_loadLevel` 世界号 | 是哪个世界 |
-  |---|---|---|
-  | `m01_00` | **0** | Nexus（楔之神殿，那些 NPC 都叫 `Nexus …`） |
-  | `m02_00` | **1** | Boletaria（条目名都叫 `Bol 1-1 …`） |
-  | `m06_00` | **2** | Stonefang |
-  | `m04_00` | **3** | Tower of Latria |
-  | `m03_00` | **4** | Shrine of Storms |
-  | `m05_00` | **5** | Valley of Defilement |
-  | `m08_00` | 8 | 教学关（不是 6） |
+| 槽 | 写进去 | 游戏里读回来 | 结论 |
+|---|---|---|---|
+| `World01` | 40 | Boletarian Palace (World 1) | 世界 1 |
+| `World05` | 160 | Stonefang Tunnel (World 2) | **世界 2** |
+| `World03` | 100 | Tower of Latria (World 3) | 世界 3 |
+| `World02` | 70 | Shrine of Storms (World 4) | **世界 4** |
+| `World04` | 130 | Valley of Defilement (World 5) | 世界 5 |
+| `World00` | 10 | 没有世界响应 | Nexus（游戏不给它世界倾向） |
+| `World06` | 190 | 没有世界响应 | 第六世界，**进不去** |
 
-* 调试菜单的页面项：`Current - World 0 (Nexus)` / `World 1 (Boletarian Palace)` /
-  `World 2 (Stonefang Tunnel)` / `World 3 (Tower of Latria)` / `World 4 (Shrine of Storms)` /
-  `World 5 (Valley of Defilement)`（eboot 串 `0x23CECF6`、`0x24663B2`、`0x24A8055`、`0x2406CE0`、
-  `0x242C92E`、`0x24102F1`；`Next    - World n (...)` 六条一一成对）
-* 拱心石名称表：`0-1 Nexus`、`1-1 Boletarian Palace` … `5-1 Valley of Defilement`
-  （另外还有 `8-1 Fort Entrance` / `8-2 Fort` / `8-3 Lava`）
-* 属性名：`WorldStatus_NexusTendency` / `_BoletariaTendency` / `_StonefangTendency` /
+所以启动器里五行对应的槽是 **`1, 5, 3, 2, 4`**（写在 `$worldSlots`，注释里也抄了一遍）。
+`World00` 和 `World06` 两行已经从界面上删掉：前者喂游戏没反应，后者是那个进不去的世界。
+
+世界**编号和名字**本身（0=Nexus、1..5=五块拱心石）倒是四条独立线索互相对得上的：
+
+* 游戏自己的传送数据 `misc/dspointsofinterest.txt`：`+cp11_loadLevel <世界> <区域>`，
+  `m01_00`→0 Nexus、`m02_00`→1 Boletaria、`m06_00`→2 Stonefang、`m04_00`→3 Latria、
+  `m03_00`→4 Shrine、`m05_00`→5 Valley、`m08_00`→8 教学关（不是 6）
+* 调试菜单页面项 `Current - World 0 (Nexus)` … `World 5 (Valley of Defilement)`，`Next - World n` 六条成对
+* 拱心石名称表 `0-1 Nexus` / `1-1 Boletarian Palace` … `5-1 Valley of Defilement`（另有 `8-1 Fort Entrance`）
+* 属性名 `WorldStatus_NexusTendency` / `_BoletariaTendency` / `_StonefangTendency` /
   `_LatriaTendency` / `_StormsTendency` / `_ValleyTendency`
 
-所以 **0 = 楔之神殿（Nexus）、1..5 = 五块拱心石的五个世界**，四套说法完全一致。
+**错的只是"槽号等于世界号"这一步**：编号那套是对的，存档槽的排布是另外一套（很像 PS3 原版的布局）。
 
-存档里的 `Tendency_World00..06` 是 **7 个槽**，但游戏的调试菜单、拱心石表和传送数据都只到 5；
-第 7 个槽（`W6`）在这个版本里**不对应任何区域**（世界编号从 5 直接跳到 8），
-界面上标作 `W6 (spare slot)`。之所以还留着它，是因为游戏的存档和 HUD 循环确实读它
-（那段循环就是 `r12 = 0..6`，见下面证据链），但不建议动它。
+升级兼容：旧设置文件里 `tendencyWorlds` 是 **7 项、按槽号排**；新版是 **5 项、按世界排**。
+启动器靠数组长度区分两者，旧文件会按 `$worldSlots` 重新取一遍，所以你之前设的数不会跑到别的世界上。
+
 
 ### 结论先放在前面（2026-10-16 定案）
 
@@ -191,8 +191,8 @@ FNV-1a，每次启动都会慢到能感觉出来。
 数值行也是（前提是勾了 "Show the numbers next to the tendency icons"，那一项**已被验证有效**）。
 想回中性填 0，想纯黑填 -200。
 
-**第三步：再开一次启动器**，看灰字那行有没有变成 `world W0..W6 -180/200/0/0/0/120/0`
-（只有 W1 那一位从 120 变成 200）。这一步不用进游戏，是确认写入成功最快的办法。
+**第三步：再开一次启动器**，看灰字那行有没有变成 `world W1..W5 120/200/0/200/0`
+（只有 W2 那一位从 120 变成 200）。这一步不用进游戏，是确认写入成功最快的办法。
 
 > **不想让它一直钉住就把勾去掉。** 勾着 = **每次启动都重写那一个世界**，你在游戏里挣来的
 > 那个世界的倾向变化下次启动会被覆盖掉；没勾的世界完全不受影响。
@@ -201,13 +201,13 @@ FNV-1a，每次启动都会慢到能感觉出来。
 想不开窗口先自查，用 `launcher.ps1 -DryRun`，它会打印两行：
 
 ```
-tendency save: SAVEDATA0PlayerProfile1  ·  character 160  ·  world W0..W6 -180/120/0/0/0/120/0
-tendency writes: Tendency_World01_BlackWhite=200 Tendency_World01_LeftRight=200 Tendency_Player_BlackWhite=60 Tendency_Player_LeftRight=60
+tendency save: SAVEDATA0PlayerProfile1  ·  character 160  ·  world W1..W5 120/120/0/200/0
+tendency writes: Tendency_World05_BlackWhite=200 Tendency_World05_LeftRight=200 Tendency_Player_BlackWhite=60 Tendency_Player_LeftRight=60
 ```
 
-第一行是**现在存档里的值**（W0..W6 按上面的编号，就是 Nexus / Boletaria / Stonefang / Latria /
-Storms / Valley / 空槽）；第二行是**这次将要写进去的**，只有你勾上的槽会出现在这里。
-两行一致 = 无事可做；不一致 = 点 Play 就会写。
+第一行是**现在存档里的值**，按 **W1..W5 = 世界 1..5** 排（背后是槽 1、5、3、2、4，见上面那张表）；
+第二行是**这次将要写进去的**，只有你勾上的世界会出现在这里，而且写的是**槽名**
+（上例勾的是 W2 Stonefang，所以是 `World05`）。两行一致 = 无事可做；不一致 = 点 Play 就会写。
 
 > "Show the numbers next to the tendency icons" 这一项仍然走 convar
 > （`cp11_uiShowNumericalTendencyData=true`），它**确实有效**——因为它只是个显示开关，
@@ -288,21 +288,23 @@ Storms / Valley / 空槽）；第二行是**这次将要写进去的**，只有�
 
 改法：
 
-* 那一个框拆成 **7 组「勾选框 + 数字框」**（`W0 Nexus` … `W6 (spare slot)`），
-  按 4 列 × 4 行的紧凑表格排，仍占 4 行高度（`$worldGrid`）；
-* **勾 = 钉住这个世界的值**，`Get-WantedTendencies` 只把勾上的槽写进列表，
+* 那一个框拆成 **5 组「勾选框 + 数字框」**（`W1 Boletarian Palace` … `W5 Valley of Defilement`，
+  每行背后的存档槽是 `1, 5, 3, 2, 4` —— 这是 2026-10-17 实测的表，别按序号推），
+  按 4 列 × 3 行的紧凑表格排（`$worldGrid`）；
+* **勾 = 钉住这个世界的值**，`Get-WantedTendencies` 只把勾上的世界写进列表，
   没勾的**一个字节都不碰**；
 * 设置项从 `tendencyWorldOn`（一个 bool）+ `tendencyWorld`（一个数）
-  变成 `tendencyWorldOn`（7 个 bool）+ `tendencyWorlds`（7 个数）；
-* **开窗时七个框自动填成存档现值**（`Get-SavedWorldTendencies`），第一次打开就能看到游戏现在的
+  变成 `tendencyWorldOn`（5 个 bool）+ `tendencyWorlds`（5 个数）；
+* **开窗时五个框自动填成存档现值**（`Get-SavedWorldTendencies`），第一次打开就能看到游戏现在的
   状态，只需要动要动的那个；
 * **老设置文件能平滑升级**：里面只有单个 `tendencyWorldOn`/`tendencyWorld`、没有 `tendencyWorlds`
-  时，按"那个勾对全部 7 个槽生效、数值从存档现读"处理 —— 也就是**行为和旧版完全一致**
-  （旧版本来就是拿一个值写满 7 个槽，而存档里那 7 个值就是它写进去的）。
-  所以默认值故意写成 `tendencyWorlds = @()`（空表）而不是 7 个 0：**空表才是"这个设置文件没有逐世界值"
-  的标记**，7 个 0 会和"真的把每个世界都钉成 0"混淆。
+  时，按"那个勾对全部世界生效、数值从存档现读"处理；而**旧的 7 项 `tendencyWorlds`（按槽号排）**
+  会按 `$worldSlots` 重新取一遍（靠 `$storedBySlot` 区分两种长度），
+  所以你之前设的数不会跑到别的世界上。
+  默认值故意写成 `tendencyWorlds = @()`（空表）而不是一串 0：**空表才是"这个设置文件没有逐世界值"
+  的标记**，一串 0 会和"真的把每个世界都钉成 0"混淆。
 
-> 一个小坑值得记下来：7 个勾选框**共用同一个事件处理脚本块**（`{ Sync-WorldBoxes }`），
+> 一个小坑值得记下来：勾选框**共用同一个事件处理脚本块**（`{ Sync-WorldBoxes }`），
 > 而不是在循环里各建一个 `{ $box.Enabled = $on.Checked }`。因为 PowerShell 的脚本块是
 > **事件触发时才去解析变量**的，循环结束后 `$on`/`$box` 只剩最后一轮的对象，
 > 那样写的结果会是"点任何一个勾都只切换最后一个框"。
@@ -393,15 +395,13 @@ Console language   [English (United States) v]
 │               │ ...                          │                              │
 │               └──────────────────────────────┘                              │
 │               [Select all] [Select none]    3 of 8 on                       │
-│ Tendency         [ ] W0  Nexus                 [-180]                       │
-│                  [ ] W1  Boletarian Palace     [ 120]                       │
-│                  [ ] W2  Stonefang Tunnel      [   0]                       │
+│ Tendency         [ ] W1  Boletarian Palace     [ 120]                       │
+│                  [ ] W2  Stonefang Tunnel      [ 120]                       │
 │                  [ ] W3  Tower of Latria       [   0]                       │
-│                  [ ] W4  Shrine of Storms      [   0]                       │
-│                  [ ] W5  Valley of Defilement  [ 120]                       │
-│                  [ ] W6  (spare slot)          [   0]                       │
+│                  [ ] W4  Shrine of Storms      [ 200]                       │
+│                  [ ] W5  Valley of Defilement  [   0]                       │
 │                  [ ] Character tendency        [ 160]                       │
-│                  SAVEDATA0PlayerProfile1 · character 160 · world W0..W6 ... │
+│                  SAVEDATA0PlayerProfile1 · character 160 · world W1..W5 ... │
 │                  [ ] Show the numbers next to the tendency icons ...        │
 │                  [ ] Ask for the debug menu at boot ...                     │
 │ Controller volume [ ] Speaker   [100] %  ...                                │
@@ -434,11 +434,12 @@ Overlay            [Off v]   top right: frame rate and frame times; detailed: GP
 `[Select all]` 对齐），下面紧接着就是 `Tendency` / `Controller volume` 那几行，整块读起来是一条连续的列表。
 （早先版本曾在列表与 `Tendency` 之间插过一行灰字 `KytyAddons options - ...`，2026-10-16 晚去掉了。）
 
-**倾向那一块是「每个世界一行」**：`W0`…`W6` 七个槽各自一个勾选框 + 一个数字框，勾哪个写哪个，
-**没勾的槽原封不动**（2026-10-16 晚之前是一个值写满七个世界，改一次会把所有章节的倾向一起冲掉）。
+**倾向那一块是「每个世界一行」**：`W1`…`W5` 五行，各自一个勾选框 + 一个数字框，勾哪个写哪个，
+**没勾的原封不动**（2026-10-16 晚之前是一个值写满所有世界，改一次会把所有章节的倾向一起冲掉）。
 `Character tendency` 是人物倾向，和世界无关，单独一行。哪一行忘了勾就不会被写进存档 —— 这是刻意的，
-代价是「以为改了其实没改」，所以灰字那行会实时把存档里的现值打出来供你对照。槽位号 `W0..W6` 各是哪个世界
-见上面「一之三」的「七个槽分别对应哪个世界」。
+代价是「以为改了其实没改」，所以灰字那行会实时把存档里的现值打出来供你对照。
+**行号就是游戏里的世界号**（W2 就是 Stonefang），但每行背后写的存档槽不是同一个数字，
+见上面「一之三」的实测表（`1, 5, 3, 2, 4`）。
 
 官方原有的选项（显示 / 画质 / 输出 / 调试叠加层 / 工具按钮）留在 `Mods` 分组**之外**，原样保留：
 
@@ -516,6 +517,158 @@ controller volume: KYTY_DUALSENSE_SPEAKER_GAIN=10, KYTY_DUALSENSE_HAPTICS_GAIN=0
 
 > ⚠️ **只对 DualSense 有效**。这两路是 DualSense 的 USB 音频端点（四声道，前一对给喇叭、后一对给马达），
 > DualShock 4 / Xbox 手柄没有这个端点，调了也不会有任何变化。
+
+---
+
+## 一之六、自适应扳机（trigger effect）：**已验证可用**
+
+> **结论（2026-10-17 19:13 实测）**：不用改任何代码。带上探针进游戏拉弓，日志里立刻出现
+> `mask=0x02 / mode=1 / send=0` 的请求序列，R2 有明显阻力。上游的实现本来就能用，
+> 之前的"没效果"只是因为当时**没有做会触发它的动作**（在菜单里切开关不会）。
+
+DS5 的自适应扳机走的是 **HID 输出报文**，和我们做的喇叭 / 马达（走 USB **音频**端点）是两条互不相干的通路，
+理论上可以同时工作。这功能**上游本来就已经实现**了（不是整合包加的补丁）：
+
+- `libs/libPad.cpp` 注册了 `scePadSetTriggerEffect`（NID `2JgFB2n9oUM`）和
+  `scePadGetTriggerEffectState`（NID `znaWI0gpuo8`）
+- `libs/controller.cpp` 的 `trigger_effect_to_dualsense()` 把 PS5 的 7 种效果模式
+  （0 关 / 1 恒定阻力 / 2 两段 / 3 振动 / 4 斜率 / 5 多点 / 6 多点振动）**全部**转成 DualSense 的
+  11 字节效果块；`GetTriggerEffectState` 也在
+- 转出来的 32 字节结构（`enable_bits` + 右扳机 11 字节 + 左扳机 11 字节）与 SDL 内部的
+  `DS5EffectsState_t` 偏移完全一致，SDL 2.33 会把它们原样塞进 USB 报文 `0x02`
+
+游戏那边也有一套预设系统（eboot 里有 `controller_triggerEffectEnable`、
+`CPOLdrPadTriggerEffectPreset`、`PlatformPadTriggerEffect`、`SendLeftTrigger`）。
+**缺的只是"有没有真的走通"的证据**，所以 2026-10-17 在 exe 里加了检测日志。
+
+### 加了哪些探针（全部 `std::printf`）
+
+> ⚠️ 必须用 `printf` 而不是 `LOGF`：**release 配置里控制台的 `LOGF` 是静默的**，
+> `PadSetVibration` 那些 `LOGF` 一行都不会出现在日志里。这也是之前看起来"什么都没发生"的原因。
+
+| 日志行 | 位置 | 说明 |
+|---|---|---|
+| `Pad: trigger effect probe ready (...)` | `Libs::Controller::Initialize` | 启动就打。**有这行才说明这份 exe 带探针**；没这行的空日志不能当作"游戏没调用" |
+| `Pad: host '<名字>' opened, SDL type N (DualSense/not a DualSense), rumble triggers 0/1` | `window.cpp` 手柄接入时 | SDL 把这手柄认成什么。type **7** 才是 DualSense |
+| `Pad: device class parsed -> class %d, data_valid %d, unique payload %d` | `libPad.cpp` `PadDeviceClassParseData` | 游戏有没有来问"这是什么手柄"。`class 0` = **STANDARD，就是 DualSense 的正确值** |
+| `Pad: controller information asked -> device_class %d (STANDARD), connected %d, count %d` | `PadGetControllerInformation` | 同上，另一条问法 |
+| `Pad: trigger effect #N mask=0x.. converted=yes/no host=.. send=.. left[mode=.. data=..] right[...]` | `SetTriggerEffect` | **游戏真的下发了效果**。`send=0` 表示 SDL 已把报文交给手柄 |
+| `Pad: trigger state poll #N -> left X, right Y` | `PadGetTriggerEffectState` | 游戏在轮询扳机状态（说明它在用这套机制） |
+| `Pad: scePadSetTriggerEffect refused handle N` / `called with a null param` | `PadSetTriggerEffect` | 游戏调了但参数被拒 |
+
+去重规则：**和上一次内容相同的请求只计数不打印**（游戏可能每帧都设一次），每个点位最多 32~64 行，
+所以日志不会被刷爆。全部 `fflush(stdout)`，即使崩溃也不会丢。
+
+### 怎么测
+
+1. **先关掉模拟器**（exe 被占用装不进去）
+2. 手柄**用 USB 线直连**（蓝牙也能发效果，但 USB 最稳，排除变量）
+3. 双击 `launcher.cmd`，正常进游戏、读档
+4. 进 **选项 → 手柄 / 控制器**，确认有扳机相关开关的话**打开**
+5. 做几个会用到扳机的动作：**拉弓（R2 蓄力）**、挥刀砍墙、举盾 —— 各做几秒
+6. 退出游戏，看最新那份日志：
+
+```powershell
+$f = Get-ChildItem 'G:\KytyPS5-v20261017\logs\*.out.log' | Sort-Object LastWriteTime | Select-Object -Last 1
+"== $($f.Name) =="
+Select-String -Path $f.FullName -Pattern 'Pad:'
+```
+
+（`logs\<日期时间>-<毫秒>.out.log` 每次启动一份，`err.log` 一般是空的。）
+
+### 日志怎么读
+
+| 看到什么 | 说明 | 下一步 |
+|---|---|---|
+| 连 `trigger effect probe ready` 都没有 | exe 被换回旧的了 | 重跑 `build-probe.ps1` |
+| 只有 `probe ready`，一行 `trigger effect #` 都没有 | **游戏从未调用** `scePadSetTriggerEffect` | 先在游戏里真的做动作（拉弓 / 挥刀）；只切菜单不会调 |
+| `host '...' opened, SDL type 2 (not a DualSense)` | SDL 把这手柄当成别的手柄（type 2 = Xbox One） | 换 USB 口/线，或先关掉 DS4Windows / Steam 输入之类的中间层 |
+| `host=DualSense` + `send=0`，但 `left[mode=0] right[mode=0]` | 报文发出去了，可内容是**"关掉"**（`mode=0` = off） | 不是故障 —— 那是切开关的反应；要手感得靠玩法动作 |
+| `host=DualSense` + `send=0`，`mode=1/2/3` 且字节非零 | 游戏确实要了效果，报文也到 SDL 了 | 跑 `probe_trigger.exe` 交叉验证；它也无效才是手柄/固件侧问题 |
+| `converted=no` | 游戏下发的参数超出转换器的取值范围（它会拒掉） | 把那一行贴回来，改 `trigger_effect_to_dualsense()` |
+| `trigger state poll` 有输出 | 游戏在等扳机状态回报 | 说明它在用这套机制，只剩手感核对 |
+| `refused handle N` | 句柄不是 1（模拟器只开 1 号手柄） | 把 N 记下来 |
+
+### 2026-10-17 第一次实测：菜单里开关开关不会有手感（不是故障）
+
+第一次带探针的实测日志里只有这几行（`host=DualSense`、`send=0`）：
+
+```
+Pad: trigger effect #1 mask=0x03 converted=yes host=DualSense send=0 left[mode=0 data=00 00 00 00] right[mode=0 data=00 00 00 00]
+```
+
+**读法（两条都是关键，之前都容易读反）：**
+
+- `send=0` 是 **成功**（SDL 的约定是 0 = ok，负数是错误）。所以"发给手柄"这一步没断。
+- `mask=0x03` + 两个 `mode=0` 的意思是**把左右扳机都设成"关"**。整局只出现 1 次。
+  对着 eboot 反汇编能对上：`CCPLdrPlatformPadTriggerEffect` 每帧把游戏选项同步到一个内部开关
+  （`this+0xFA`），**只在开关值变化的那一帧**发一次"全关"。也就是说玩家在菜单里切那个选项，
+  游戏确实收到了，但那次动作本身只是"关掉"。
+- 真正的阻力来自玩法代码（拉弓、挥刀时才调 `SetFeedback` / `SetWeapon` / `SetVibration`），
+  所以"在菜单里开开关关"本来就不会有手感，得**在游戏里做出那些动作**。
+- `rumble triggers 0` 也**不是故障**：SDL 对 DualSense 的 `RumbleJoystickTriggers` 一律返回
+  Unsupported（它指"扳机震动马达"，不是自适应扳机），和这功能无关。
+
+### 2026-10-17 19:13 第二次实测：**正常，功能可用**
+
+真在游戏里拉弓之后，日志立刻变了——28 行 `Pad:`，其中 25 条是真实的扳机请求：
+
+```
+Pad: trigger effect #1 mask=0x02 ... left[mode=0 ...] right[mode=0 data=00 00 00 00]
+Pad: trigger effect #2 mask=0x02 ... left[mode=0 ...] right[mode=1 data=05 03 00 00]
+Pad: trigger effect #4 mask=0x02 ... left[mode=0 ...] right[mode=0 data=05 03 00 00]
+Pad: trigger effect #5 mask=0x02 ... left[mode=0 ...] right[mode=1 data=05 03 00 00]
+...（一路交替到 #43）
+```
+
+**逐项对照游戏传进来的原始参数**（打印的是 `PadTriggerEffectParam`，不是转换后的 USB 字节）：
+
+| 字段 | 值 | 含义 |
+| --- | --- | --- |
+| `mask` | `0x02` | 只设**右**扳机（bit0=左, bit1=右）——弓在右手，对得上 |
+| `mode` | `1` / `0` | `1` = `FEEDBACK`（连续阻力），`0` = 关闭；拉弓/松开时交替 |
+| `data[0]` | `0x05` | 阻力**起点区位 5**（10 个区位，55% 行程处开始变硬） |
+| `data[1]` | `0x03` | 阻力**强度 3/8**（轻档，符合蓄力第一段） |
+| `converted` | `yes` | 转成 DualSense 11 字节块：`0x21` 连续阻力，区位 5~9 填 3 |
+| `send` | `0` | SDL 已把报文交给手柄，成功 |
+
+结论：**链路从头到尾通了** —— 玩法发请求 → Kyty 转换 → SDL 发 USB 报文 `0x02` → 手柄出阻力。
+用户实测 R2 有明显手感，无需再改代码。上一节"游戏还没开口要"的判断是对的：
+功能本来就在，只是那次会话里没有做出会触发它的动作。
+
+> `#N` 会跳号（3、6、9…不是缺行）：和上一条**完全相同**的请求只计数不打印，避免每帧刷屏。
+> 这一版 64 行封顶，之后只累计计数。
+
+### 主机侧单独测：`dualsense\probe_trigger.exe`
+
+分不清"是模拟器没发出去"还是"手柄没反应"时，先跑这个（SDL2 静态链接，双击即可，不需要模拟器）：
+
+```
+G:\KytyAddons\dualsense\probe_trigger.exe        # 默认 3 轮，可跟数字改轮数
+```
+
+它用**和模拟器同一套**发送代码与字节转换，先震马达 1.2 秒（证明 HID 输出通路本身是通的），
+然后依次给 R2、L2 发 `feedback`（20% 处一堵墙）/ `weapon`（20%→70% 递增阻力）/ `vibration`（30% 起嗡嗡）/ `off`，
+每一步打印 `send=0 (ok)` 与否以及那 11 个字节。**R2/L2 有明确变化 ⇒ 主机侧没问题**，只差游戏发请求。
+
+### 一个订正
+
+我先前说 `PadGetControllerInformation` 里的 `device_class = 0` 应该是 1 —— **这是错的**。
+`SCE_PAD_DEVICE_CLASS_STANDARD` 就是 **0**（`libPad.cpp` 里 `PadDeviceClassParseData` 的注释也这么写），
+所以那一处不用改。
+
+### 检测代码怎么保留
+
+补丁在 **`dualsense\trigger-probe.patch`**（对 `src-active` 的 HEAD 导出，三个文件：
+`src\libs\controller.cpp`、`src\libs\libPad.cpp`、`src\graphics\presentation\window\window.cpp`）。
+
+> ⚠️ `rebuild.ps1` 会先从源码包**同步上游文件**进 `src-active`，`controller.cpp` / `libPad.cpp` 会被覆盖，
+> 探针就没了。升级版本后想留着它，在 `rebuild.ps1` 跑完后、编译前手工 `git apply` 一次：
+> ```
+> git -C G:\kyty-build\src-active apply --ignore-whitespace G:\KytyAddons\dualsense\trigger-probe.patch
+> ```
+> 只想编探针版（不动上游源码、不重新下载源码包）就用 **`G:\kyty-build\build-probe.ps1`**：
+> 它直接 `ninja`，编完校验 exe 里那几个字符串，再备份旧 exe 并安装到发布目录。
 
 ---
 
