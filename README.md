@@ -1,3 +1,9 @@
+> [!IMPORTANT]
+> **This is `Sebs886/KytyPS5`, a fork that adds Demon's Souls extras on top of upstream v20261017:**
+> DualSense haptics and controller speaker, a per-world tendency editor, and per-mod cheat switches.
+> See **[ADDONS.md](ADDONS.md)** for what changed and **[the v20261017-addons release](https://github.com/Sebs886/KytyPS5/releases/tag/v20261017-addons)** to download it.
+> The `addons` branch is the default branch here; everything below is upstream's README, unchanged.
+
 > [!NOTE]
 > **This fork is tuned for Demon's Souls.** Its renderer, shader and memory paths are optimized for
 > **Demon's Souls (PS5, PPSA01341), game versions 1.07 (01.007.000) and 1.05 (01.005.000)**: both are
@@ -7,8 +13,10 @@
 > GPU with 12 GB of video memory are recommended; it also runs with 16 GB of RAM (slower loading) and 8 GB
 > of video memory (the test PC limited to 8 GB: most areas 40–60 fps, the heaviest 10–35).
 >
-> **Download: [the latest release](https://github.com/chenxiao07/KytyPS5/releases/latest)**, a Windows
-> x64 build made by GitHub Actions from this branch. Unzip it, double-click `launcher.cmd` (or
+> **Download: [this fork's addons release](https://github.com/Sebs886/KytyPS5/releases/tag/v20261017-addons)**
+> (an 8 MB overwrite on top of upstream's full package) or
+> [upstream's latest](https://github.com/chenxiao07/KytyPS5/releases/latest), a Windows
+> x64 build made by GitHub Actions from that branch. Unzip it, double-click `launcher.cmd` (or
 > `run.cmd`) and choose the game folder (the one with `eboot.bin`); the `README.md` inside explains
 > the rest. Use only a game dump made from your own copy of the game. To build it yourself, see
 > [Building with build-windows.cmd](#building-with-build-windowscmd-windows).
