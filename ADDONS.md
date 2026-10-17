@@ -1,126 +1,224 @@
-# KytyPS5 + addons
+# KytyPS5 add-ons · Demon's Souls
 
-A fork of [chenxiao07/KytyPS5](https://github.com/chenxiao07/KytyPS5) that keeps four things on top of the
-upstream portable Windows build, all of them for **Demon's Souls (PPSA01341)**:
+> **This is the fork's add-on guide.** Everything described here lives in this repository under `addons/`
+> (the launcher, the cheats, the DualSense backend); `git diff v20261017` is the whole of it. Download the
+> overlay from the [v20261017-addons release](https://github.com/Sebs886/KytyPS5/releases/tag/v20261017-addons).
+> The engineering notes behind it — how the save format was worked out, every address, every dead end — are
+> in [addons/NOTES.zh-CN.md](addons/NOTES.zh-CN.md) (Chinese).
 
-* **a launcher with the switches the release does not have** — a cheat-file picker with one checkbox per
-  mod, per-world world tendency, character tendency, the debug-menu switch and the controller volumes;
-* **a DualSense backend of its own** — the upstream haptics (`src/libs/dualSenseHaptics.cpp`, a WASAPI
-  backend that opens the audio endpoint through `IAudioClient`) is replaced by an SDL2 one that mixes the
-  speaker and the actuators by hand, so their volumes are adjustable independently and the two do not cut
-  each other off;
-* **the tendency editor** — writes `Tendency_World*_*` / `Tendency_Player_*` straight into the save, one
-  world at a time, so changing one world no longer flattens the others. The save's slot order is **not**
-  the world order — it is `1, 5, 3, 2, 4` — see "Notes on the addons" below for how that was measured;
-* **the cheat file** — eight mods for 01.007.000, four of them on by default, each traced back to the
-  routine it patches (see `addons/cheats/README.md`).
+Three things stacked on top of [KytyPS5](https://github.com/chenxiao07/KytyPS5) (upstream v20261017):
+**cheats**, **per-world tendency** and **DualSense speaker / haptics**. Adaptive triggers need no work —
+upstream already does them.
 
-Everything else is upstream, unchanged. `git diff v20261017` is the whole of it.
+- Just want to play 👉 [Install](#install)
+- Something is broken 👉 [Troubleshooting](#troubleshooting)
+- Want to know where every address came from 👉 [NOTES.zh-CN.md](addons/NOTES.zh-CN.md) (engineering notes, long, Chinese)
 
-English summary: this fork adds a custom launcher (cheats, per-world tendency, controller volume), an
-SDL2 DualSense backend in place of the WASAPI one, and a documented cheat file. Only
-`src/libs/dualSenseHaptics.cpp` and `.h` differ from upstream; the launcher, cheats and the tooling that
-builds them live under `addons/`. GPL-2.0, same as upstream.
+---
 
-## Using a release
+## What it adds
 
-The release asset is an **overlay**, not a complete build: unpack it over an upstream
-`KytyPS5-v20261017`, replacing `kyty_emulator.exe` and adding `launcher.ps1` and `cheats\`.
+| Feature | In one line | Rebuild needed? |
+| --- | --- | --- |
+| **Cheats** | 8 mods (souls / HP / stamina / MP …), one checkbox each in the launcher | No |
+| **World tendency** | Writes the values straight into the save, one world at a time | No |
+| **Controller speaker / haptics** | Replaces upstream's WASAPI backend with an SDL2 one, so the two audio paths no longer cut each other off, with adjustable volumes | Yes (a built exe ships in the package) |
+| **Adaptive triggers** | Already implemented upstream, verified working, not a line changed | No |
 
-1. Download the upstream `KytyPS5-v20261017` release and unpack it anywhere.
-2. Unpack `KytyPS5-addons-v20261017.zip` over that folder (say yes to replacing `kyty_emulator.exe`).
-3. Run `launcher.cmd` instead of `run.cmd`.
+---
 
-The launcher writes `launcher-settings.json` next to itself and keeps the game folder in it. On a fresh
-install, tick **Cheats**, choose the file, and press **Play**.
+## Install
 
-If Windows complains that the scripts are not signed, the zip came through a browser that marked it:
-`Unblock-File *.ps1` or the file's Properties → Unblock. `launcher.cmd` already passes
-`-ExecutionPolicy Bypass`.
+### Option 1: the overlay from the release page (recommended, ~8 MB)
 
-## Building it yourself
+1. Download the full **v20261017** package from upstream and unpack it anywhere:
+   <https://github.com/chenxiao07/KytyPS5/releases/tag/v20261017>
+2. Unpack `KytyPS5-addons-v20261017.zip` **over** that folder (say yes to replacing `kyty_emulator.exe`).
+3. Double-click **`launcher.cmd`** (not `run.cmd`). The first run asks for the game folder — pick the one
+   that contains `eboot.bin`.
 
-`addons/dualsense/rebuild.ps1` does the whole thing: it downloads the release's source, applies
-`dualsense-v20261016.patch`, builds it with clang-cl + Ninja and drops the program into the release
-folder.
+### Option 2: build it from this repository
+
+Download or `git clone` the repository and double-click `addons/install.cmd`, then pick the emulator
+folder — same result as the overlay.
+
+### What installing does
+
+- Everything it replaces is backed up to `_Backup\` in the emulator folder, so you can always roll back.
+- Your own settings (resolution, game path, which cheats were ticked, tendency values, controller
+  volumes …) are **kept**.
+- If this build's exe already carries a haptics module, the installer says so and leaves it alone.
+
+> **Close the emulator first** — a locked exe cannot be replaced.
+
+### If Windows says the script is not digitally signed
+
+The zip carries a "from the internet" mark; clear it once:
 
 ```powershell
-cd addons\dualsense
-.\rebuild.ps1 -Target G:\KytyPS5-v20261017 -Version v20261017
+Get-ChildItem *.ps1 | Unblock-File
 ```
 
-It needs Visual Studio 2026 (C++ workload, Clang 20 or newer), CMake and Ninja. The first build takes
-about fifteen minutes, a later one only recompiles what changed. `-NoInstall` builds without touching
-the release folder.
+(Or right-click `launcher.ps1` → Properties → Unblock.)
 
-The launcher, the cheats and the installer need no build at all — `addons\install.ps1 -Target <folder>`
-copies them onto any release (v20261014 and newer; the optional switches it passes are checked against
-`run-windows.ps1` first, so an older release does not fail on a switch it does not have).
+---
 
-## What is where
+## What is new in the launcher
 
-| Path | What it is |
+Upstream's display / quality / output options are untouched. Everything new lives in one **`Mods`** group:
+
+```
+┌─ Mods ─────────────────────────────────────────────────┐
+│ [x] Cheats   [PPSA01341_01.007.000.json ▾]             │
+│     [x] Max Souls (999,999,999)                        │
+│     [x] Infinite HP  (Player - No Damage)              │
+│     …                                                  │
+│     [Select all] [Select none]            4 of 8 on    │
+│ Tendency      [ ] W1  Boletarian Palace     [ 120]     │
+│               [ ] W2  Stonefang Tunnel      [ 120]     │
+│               [ ] W3  Tower of Latria       [   0]     │
+│               [ ] W4  Shrine of Storms      [ 200]     │
+│               [ ] W5  Valley of Defilement  [   0]     │
+│               [ ] Character tendency        [ 160]     │
+│               SAVEDATA0PlayerProfile1 · character 160  │
+│ Controller volume [ ] Speaker   [100] %                │
+│                   [ ] Vibration [100] %                │
+└────────────────────────────────────────────────────────┘
+```
+
+The `SAVEDATA0PlayerProfile1 · character 160` line is grey and read live from the save when the window
+opens — that is your check that a write actually happened.
+
+### Cheats: tick what you want
+
+| On by default | Off by default |
 | --- | --- |
-| `addons/launcher.ps1` | the launcher: upstream's window plus a `Mods` group (cheats, tendencies, debug menu, controller volumes) |
-| `addons/install.ps1`, `install.cmd` | copies the launcher and the cheats onto a release folder |
-| `addons/cheats/` | the cheat file, `verify_cheat.py` (checks every offset against the game's `eboot.bin`) and its README |
-| `addons/dualsense/` | the SDL2 backend, its patch, `rebuild.ps1`, plus the adaptive-trigger probe (`trigger-probe.patch`, `probe_trigger.exe` and its source) |
-| `addons/NOTES.zh-CN.md` | the engineering notes behind all of it (Chinese: how the save format was worked out, every address, every dead end) |
-| `src/libs/dualSenseHaptics.cpp`, `.h` | the only upstream files this fork changes |
+| Max Souls (999,999,999) | Player Never Dies |
+| Infinite HP (player takes no damage) | One Hit Kill (experimental) |
+| Infinite Stamina | Debug menu: open in game (experimental) |
+| Infinite MP | Dev build flags: RetailBuild off (experimental) |
 
-## Notes on the addons
+The `Cheats` master switch greys the whole block out — nothing is loaded then. Offsets are written for
+**01.007.000 (PPSA01341)**; another game version would patch the wrong addresses. Check a file against
+`eboot.bin` with `addons/cheats/verify_cheat.py` before trusting it.
 
-**Per-world tendency.** The save stores sixteen floats, nine bytes each, after a `u32 version | u32
-checksum | u32 size | u32` header: `Tendency_Player_BlackWhite`, `_LeftRight`, then
-`Tendency_World00..06_BlackWhite` / `_LeftRight`. The values run −200 (pure black) to +200 (pure white).
-Only the worlds whose box is ticked are written; the rest are left byte for byte alone.
+### World tendency: **a box has to be ticked**
 
-**Which slot is which world** is the one thing here that could not be read out of the executable. The
-game's own world numbering (0 Nexus, 1 Boletarian Palace, 2 Stonefang Tunnel, 3 Tower of Latria, 4 Shrine
-of Storms, 5 Valley of Defilement, 6 unused — the numbering jumps 5 → 8 and the tutorial is world 8) is
-easy to establish, and every document written from it will tell you that slot *N* holds world *N*. It does
-not. Writing one distinct value into each of the seven slots and reading the game's **Tendency** page back
-gives:
+Tendency does not live in a launch parameter, it lives in the save — so the launcher edits the save file:
 
-| Slot | `World00` | `World01` | `World02` | `World03` | `World04` | `World05` | `World06` |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| World shown in game | — (Nexus) | 1 Boletarian Palace | **4 Shrine of Storms** | 3 Tower of Latria | 5 Valley of Defilement | **2 Stonefang Tunnel** | — (nothing) |
+```
+_SaveData\PPSA01341\SAVEDATA0PlayerProfile<n>\USR-DATA
+```
 
-So the launcher holds the map as `1, 5, 3, 2, 4` and shows five rows, one per world that actually exists,
-in the game's order. `World00` (Nexus, which has no world tendency) and `World06` (the sixth world, whose
-archstone is not reachable in this build) are left out: writing them changes nothing anywhere in the game.
+Three rules cover every mistake:
 
-Older versions of this fork wrote slot *N* for world *N*. A settings file from one of those is still read
-correctly — the stored list is seven entries long and is therefore taken as slot order and remapped, while
-a five-entry list is taken as world order.
+1. **Ticked = written.** An unticked world is not touched at all — set Stonefang to pure white and leave the
+   other worlds exactly as the game has them.
+2. **Applies at launch.** Quit the game, change, start again. Editing while it runs does nothing.
+3. **Ticked = pinned.** Every launch writes your value back, so progress you make in game is overwritten next
+   start. Untick it to let the game have its way again.
 
-**Adaptive triggers** need no addon at all: upstream already converts `scePadSetTriggerEffect` through
-`trigger_effect_to_dualsense()` into the 11-byte effect blocks and hands them to SDL, which puts them in a
-USB output report of its own. It works — with the game's trigger effect option on, drawing a bow on a
-DualSense sends `mode 1` (feedback) on the right trigger and releasing sends `mode 0`, 25 times in one
-short session. What it does **not** do is reflect the menu switch: the game's
-`CCPLdrPlatformPadTriggerEffect` component only mirrors that option into a byte and sends a one-off
-"both triggers off" when it changes, so toggling the option in the menu can never be felt. The effect has
-to come from gameplay. `addons/dualsense/trigger-probe.patch` adds `printf` traces to the way in and
-`addons/dualsense/probe_trigger.exe` drives the same effects straight from the host, without the emulator,
-to tell a game-side problem from a controller-side one.
+Range is **−200 (pure black) ~ 0 (neutral) ~ +200 (pure white)**.
 
-**The debug menu.** There is no key that opens it in this build, and `cp11_toggleDebugMenu` cannot either:
-the game's whole input routine is dead code behind a `bool*` in `.bss` that nothing in the executable
-ever writes, so it reads through to address zero every frame. The launcher offers a cheat mod that patches
-that branch instead, off by default and marked experimental.
+**The save's slot numbers are not world numbers.** Measured, not guessed — and it is not the obvious order:
 
-**Cheats.** `kyty_emulator.exe --game-patch <json>` does not write at the offsets blindly: it searches for
-the first entry whose `off` bytes are not zero, derives a source base from where those bytes are found, and
-requires every other entry to match at that base. `verify_cheat.py` replicates that loader so a file can
-be checked against a game's `eboot.bin` without starting the emulator. Run it after touching an offset.
+| World in game | W1 Boletarian | W2 Stonefang | W3 Latria | W4 Shrine | W5 Valley |
+| --- | --- | --- | --- | --- | --- |
+| Save slot written | `World01` | **`World05`** | `World03` | **`World02`** | `World04` |
 
-**Controller volume.** The SDL2 backend mixes the speaker port and the actuator port into one four-channel
-block before queueing it — queueing them separately doubles the rate and the two paths silence each other.
-Volumes are percentages, 100 % being what the package does by default.
+That is why the window shows **five rows in world order** with the slot mapping baked in — you never see it.
+Settings files from older versions (7 entries, slot order) are remapped automatically, so values you already
+set do not jump to another world.
 
-## Licence
+### Controller volume
 
-GPL-2.0, the same as upstream — see `LICENSE`. The changes this fork makes are in `src/libs/` (listed
-above) and under `addons/`; a build of this tree is what the release asset contains. Demon's Souls and its
-files are not part of any of it.
+Both rows are a percentage **of what the package does by default**, so **100 % changes nothing**:
+
+| Row | Controls | Range |
+| --- | --- | --- |
+| Speaker | the pad's **speaker** | 0–400 % (0 % mutes) |
+| Vibration | the pad's **actuators / haptics** | 0–400 % (0 % stops) |
+
+These are the controller's own two outputs. They do **not** touch the game's main volume (that is still the
+Windows slider).
+
+### Debug menu
+
+There is **no key that opens it** in this build: the game's only binding is a console shortcut command, and
+the input routine behind it is dead code gated by a pointer in `.bss` that nothing ever writes. Two
+experimental mods try to force it from the code side — `Debug menu: open in game` and
+`Dev build flags: RetailBuild off`. **Off by default, may crash.** Curiosity only.
+
+---
+
+## Troubleshooting
+
+**Tendency still shows 0.00?**
+Check three things: the game is closed, that row is **ticked**, and you **restarted** the game. The grey line
+shows what the save actually holds — or run `launcher.ps1 -DryRun`, which prints without writing.
+
+**I set world 2 to 200 and world 4 changed?**
+That was an old launcher bug (it assumed slot number = world number). Fixed: world 2 now writes `World05`
+and world 4 writes `World02`, as in the table above.
+
+**No resistance on the triggers?**
+First **actually draw a bow or swing a weapon** in game — toggling "trigger effect" in the menu never produces
+a feel, because the game sends one "both triggers off" when the switch changes and nothing else. If that does
+not help, run `addons/dualsense/probe_trigger.exe`: it drives R2/L2 through four effects without the emulator and
+buzzes the motors first to prove the path. Tool works + game does not = game side; neither works = pad or OS.
+
+**No sound from the controller speaker, or too quiet?**
+The stream the game sends to that port is very low to begin with (peaks around −40 dB), and the package
+applies ×8 by default. Still quiet: raise Speaker — 400 % is ×32.
+
+**How do I know this is the add-on build?**
+`kyty_emulator.exe` contains both `DualSenseHaptics` and `KYTY_DUALSENSE_HAPTICS`; upstream has neither.
+
+**It will not start?**
+Look at the newest `.out.log` under the emulator's `logs\`, then try rolling back a file from `_Backup\`.
+
+---
+
+## Following a new upstream release
+
+1. Unpack the new version into a new folder.
+2. Run `addons/install.cmd` and point it at that folder — launcher and cheats work immediately.
+3. If that release has no haptics module, or you want the SDL2 backend, run `addons/dualsense/rebuild.cmd` once.
+
+`addons/install.cmd` **never swaps the exe on its own**; it only replaces it when the package holds a build for
+exactly that version, and tells you when it does.
+
+## Building from source (optional)
+
+```powershell
+cd addons/dualsense
+.\rebuild.cmd -Target G:\KytyPS5-v20261017 -Version v20261017
+```
+
+One command does the lot: download that tag's source → apply the patch → build → install into the release
+folder. About fifteen minutes the first time, then one or two minutes for later changes (only what changed is
+recompiled). **The cheats need no build at all.**
+
+Needs Visual Studio 2026 (C++ workload, Clang 20+), CMake and Ninja.
+
+## Where everything lives
+
+```
+addons\
+  launcher.ps1                 the launcher (upstream options + the Mods group)
+  install.ps1 / install.cmd    copies the launcher and the cheats onto any release folder
+  cheats\                      the cheat file, its README and verify_cheat.py
+  dualsense\                   SDL2 backend: patches, rebuild.ps1, prebuilt exe, trigger probe
+  NOTES.zh-CN.md               engineering notes (Chinese)
+ADDONS.md                      this file
+ADDONS.zh-CN.md                the same guide in Chinese
+src\libs\dualSenseHaptics.*    the only upstream files this fork changes
+```
+
+## Licence and credits
+
+- A fork of [chenxiao07/KytyPS5](https://github.com/chenxiao07/KytyPS5), **GPL-2.0** like upstream.
+- Binaries are distributed together with their source: `addons/` and `src/libs/dualSenseHaptics.*` in the repo.
+- Repository <https://github.com/Sebs886/KytyPS5> · release <https://github.com/Sebs886/KytyPS5/releases/tag/v20261017-addons>
+- You need your own copy of the game and its firmware files; nothing here contains game data. Written for
+  **Demon's Souls PS5 01.007.000 (PPSA01341)** only.

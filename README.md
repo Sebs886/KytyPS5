@@ -1,8 +1,9 @@
 > [!IMPORTANT]
 > **This is `Sebs886/KytyPS5`, a fork that adds Demon's Souls extras on top of upstream v20261017:**
 > DualSense haptics and controller speaker, a per-world tendency editor, and per-mod cheat switches.
-> See **[ADDONS.md](ADDONS.md)** for what changed and **[the v20261017-addons release](https://github.com/Sebs886/KytyPS5/releases/tag/v20261017-addons)** to download it.
-> The `addons` branch is the default branch here; everything below is upstream's README, unchanged.
+> Read **[ADDONS.md](ADDONS.md)** (English) or **[ADDONS.zh-CN.md](ADDONS.zh-CN.md)** (中文) for what changed,
+> and grab **[the v20261017-addons release](https://github.com/Sebs886/KytyPS5/releases/tag/v20261017-addons)**
+> to install it. The `addons` branch is the default branch here; everything below is upstream's README, unchanged.
 
 > [!NOTE]
 > **This fork is tuned for Demon's Souls.** Its renderer, shader and memory paths are optimized for
