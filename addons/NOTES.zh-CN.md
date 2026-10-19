@@ -1053,3 +1053,36 @@ installed                 G:\KytyPS5-v20261016\kyty_emulator.exe (the old one is
 - 金手指：`verify_cheat.py` 4/4 通过
 - 设置迁移：旧 29 键原样搬过来，`cheatFile` 指向新目录；DryRun 输出
   `World05=200` / `World02=0` / 喇叭增益 1.2（15 %）/ 震动 1（100 %）
+
+### 启动前检查残留进程（2026-10-19 晚，用户报"勾了 HDR 就起不来"）
+
+现象：勾 HDR 后进程一闪而过。日志只有 25 行，停在 `Initialized: Network`，紧接着
+
+```
+--- Error ---
+could not reserve 13824 MB for guest direct memory.
+```
+
+**与 HDR 无关**。`GuestBackingStore`（`memoryAddressSpace.inc`）用
+`CreateFileMappingA(… PAGE_EXECUTE_READWRITE | SEC_COMMIT, 13824 MiB)`，Windows 要求**启动时一次性提交**
+13.5 GiB；提交不了就 EXIT。拿掉 `--hdr` 用同一命令行做对照，报的是一模一样的错，这就排除了 HDR。
+
+真正的占用者：18:36 那次（`2560x1440 --fullscreen` + 金手指，**没开 HDR**）日志已经写到
+`Shader warmup: saved …`（关闭流程最后一步），进程剩 **1 个线程**、`WaitReason=Executive`、占 18.4 GB 提交 /
+14 GB 工作集。`Stop-Process -Force`、`taskkill /F`、WMI `Terminate` 全部无效（返回值也拿不到成功的），
+`SetProcessWorkingSetSize(h, -1, -1)` 只能把工作集换出、释放物理内存，**提交量不还**，所以下一次启动照样失败。
+只有重启能清掉。
+
+所以启动器加了 `Get-LeftoverEmulator` / `Format-Gigabytes` / `Confirm-EmulatorIdle` 三个函数，
+在 `$play` / `$precompile` / `$share` 的 handler **第一行**（早于 `Read-Form`，免得白写存档）调用：
+
+- 有残留 → 弹窗列 `PID xx: N.N GB committed, started HH:mm, N thread(s)`，YesNoCancel
+  - Yes = 结束后再启；No = 忽略继续；Cancel = 什么都不做
+  - 结束后复检，仍在 ⇒ 第二个弹窗说明"卡在显卡驱动里杀不掉，只能重启"，返回 false
+- 无残留 → 直接返回 true，不弹窗
+- 判断"僵尸"用 `MainWindowHandle -eq 0 -and -not Responding`，正常游戏开着时给的是"已经有一个在跑"的文案
+- `$exe` 可能指向 `_Build\windows\kyty_emulator.exe`，所以进程名取基名而非写死
+
+`StartTime` 用 `try/catch` 兜住（个别进程取不到会抛）。沙箱里 `Invoke-Expression` 被禁，
+所以函数测试是先从 AST 抽出 `FunctionDefinitionAst.Extent.Text` 写临时文件再 dot-source。
+

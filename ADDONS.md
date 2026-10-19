@@ -182,7 +182,33 @@ applies ×8 by default. Still quiet: raise Speaker — 400 % is ×32.
 `kyty_emulator.exe` contains both `DualSenseHaptics` and `KYTY_DUALSENSE_HAPTICS`; upstream has neither.
 
 **It will not start?**
-Look at the newest `.out.log` under the emulator's `logs\`, then try rolling back a file from `_Backup\`.
+Open the newest `.out.log` under the emulator's `logs\`. If it says
+`could not reserve 13824 MB for guest direct memory`, the **previous run never finished exiting** and still
+holds 13.5 GB — nothing to do with whichever option you just ticked (HDR gets blamed a lot; it is usually just
+the last thing you touched).
+
+The emulator claims that 13.5 GB up front, so if the last run has not given it back, this one fails and the
+window flashes past. Play and Precompile therefore check for a left-over `kyty_emulator.exe` first: the dialog
+names its PID, how much it holds and whether it still answers, then offers —
+
+- **Yes** — end it and start normally
+- **No** — leave it and start anyway (fine if there is memory to spare)
+- **Cancel** — do nothing
+
+If it cannot be ended, the dialog says so: such a process is stuck in the graphics driver, no tool can stop it,
+and only a reboot frees the memory. You can also check yourself with `Get-Process kyty_emulator` in PowerShell;
+no output means clean.
+
+By the way, pressing Play while a game is running shows the same dialog, saying a second copy wants another
+13.5 GB.
+
+**Why did it always look like "that one option breaks startup"?**
+Because the failure happens at the memory step, before any graphics device exists — the window vanishes and all
+you remember is the thing you just changed.
+
+**Some other startup failure?**
+If the log shows something else, roll back a file from `_Backup\` and see which stage the newest `.out.log`
+stops at.
 
 ---
 

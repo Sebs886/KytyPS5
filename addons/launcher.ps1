@@ -1177,7 +1177,57 @@ function Read-Form {
 	}
 	Save-Settings
 }
+# Left-over guard ----------------------------------------------------------------------------------
+# The emulator commits a 13.5 GB backing store for the guest when it starts, and gives it back only
+# when the process really exits. A run that hangs while exiting keeps it, and once such a process is
+# stuck in the driver it cannot be ended at all. The next start then dies at "could not reserve 13824
+# MB for guest direct memory" before any window appears, which reads exactly like the option that was
+# just changed being broken. Ask here instead, where the process can be named and its memory counted.
+function Get-LeftoverEmulator {
+	$name = [System.IO.Path]::GetFileNameWithoutExtension($exe)
+	foreach ($process in @(Get-Process -Name $name -ErrorAction SilentlyContinue)) {
+		$started = 'an unknown time'
+		try { $started = $process.StartTime.ToString('HH:mm') } catch { }
+		[pscustomobject]@{
+			Id        = $process.Id
+			Started   = $started
+			Committed = $process.PrivateMemorySize64
+			Threads   = $process.Threads.Count
+			Hung      = ($process.MainWindowHandle -eq 0) -and (-not $process.Responding)
+		}
+	}
+}
+function Format-Gigabytes([double]$bytes) { return '{0:N1} GB' -f ($bytes / 1GB) }
+# $true when the launcher may start. $false when the user cancelled, or when a left-over process
+# survived being ended - that one has to be cleared by a reboot.
+function Confirm-EmulatorIdle {
+	$left = @(Get-LeftoverEmulator)
+	if ($left.Count -eq 0) { return $true }
+	$report = ($left | ForEach-Object {
+		'  PID {0}: {1} committed, started {2}, {3} thread(s)' -f $_.Id, (Format-Gigabytes $_.Committed), $_.Started, $_.Threads
+	}) -join "`r`n"
+	$hung = @($left | Where-Object { $_.Hung })
+	if ($hung.Count -gt 0) {
+		$text = "An earlier run of the emulator is still holding its memory:`r`n`r`n$report`r`n`r`nThat process has no window and does not answer, so it most likely hung while exiting. It keeps about 13.5 GB committed, and a new start fails at `"could not reserve 13824 MB`" before any window appears.`r`n`r`nEnd it and start anyway?"
+	} else {
+		$text = "The emulator is already running:`r`n`r`n$report`r`n`r`nA second copy asks for another 13.5 GB of committed memory. End the running one and start a fresh one?"
+	}
+	$answer = [System.Windows.Forms.MessageBox]::Show($text, 'KytyPS5 launcher', 'YesNoCancel', 'Warning')
+	if ($answer -eq [System.Windows.Forms.DialogResult]::Cancel) { return $false }
+	if ($answer -eq [System.Windows.Forms.DialogResult]::No) { return $true }
+	foreach ($process in $left) {
+		try { Stop-Process -Id $process.Id -Force -ErrorAction Stop } catch { }
+	}
+	Start-Sleep -Milliseconds 800
+	$still = @(Get-LeftoverEmulator)
+	if ($still.Count -eq 0) { return $true }
+	$ids = ($still | ForEach-Object { "PID $($_.Id)" }) -join ', '
+	[System.Windows.Forms.MessageBox]::Show("$ids did not end. A process stuck in the graphics driver cannot be stopped from here - reboot Windows to release its memory, then start the emulator again.", 'KytyPS5 launcher', 'OK', 'Error') | Out-Null
+	return $false
+}
+
 $play.Add_Click({
+	if (-not (Confirm-EmulatorIdle)) { return }
 	Read-Form
 	# The tendencies go into the save before the emulator starts, so the value is in place for the
 	# load that follows. A failure is shown rather than swallowed - a silently unwritten save is
@@ -1192,10 +1242,12 @@ $play.Add_Click({
 	$form.Close()
 })
 $precompile.Add_Click({
+	if (-not (Confirm-EmulatorIdle)) { return }
 	Read-Form
 	Start-Process $cmd -ArgumentList "/s /c `"$(Get-PrecompileCommand)`"" -WorkingDirectory $root
 })
 $share.Add_Click({
+	if (-not (Confirm-EmulatorIdle)) { return }
 	Read-Form
 	Start-Process $cmd -ArgumentList "/s /c `"$(Get-PrecompileCommand '-ExportHints')`"" -WorkingDirectory $root
 })
