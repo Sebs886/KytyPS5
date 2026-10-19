@@ -1007,3 +1007,49 @@ installed                 G:\KytyPS5-v20261016\kyty_emulator.exe (the old one is
   不碰 `audio.cpp`。官方只要没动这两个文件，补丁就一直好使；万一 `git apply` 失败，脚本会依次降级尝试，
   仍失败就用 `v20261016\` 里的源文件直接覆盖（所以源文件和补丁**要保持一致**，见第五节的导出步骤）
 - 子模块（ffmpeg、SDL2、LibAtrac9 等）版本目前与 1013 一致，若上游升级了子模块，`rebuild.ps1` 里缓存的那份会不匹配，需要重新拉取
+
+## 八、v20261019 移植记录（2026-10-19）
+
+上游隔了一版（1018）连发了 1019，这一版改动比上次大得多。
+
+### 补丁：不用重做
+
+| 文件 | 1017 → 1019 | 结论 |
+|---|---|---|
+| `src/libs/dualSenseHaptics.cpp` / `.h` | **字节未变** | 补丁原样可用 |
+| `src/libs/audio.cpp` | 103,746 → 107,181 | 官方新增 `KYTY_AUDIO_CUSHION_MS` 等诊断，与补丁无交集 |
+| `src/libs/controller.cpp` | 27,476 → 27,800 | `Disconnect()` 改成"找不到就返回"（issue #49），与补丁无交集 |
+| `controller.h` / `gamePatch.cpp` | 字节未变 | — |
+
+`git apply --check` 对 1019 源码一次通过。
+
+### 启动器：三方合并，不是手工抄
+
+官方启动器从 353 行涨到 489 行，新增（都在，一行没丢）：
+
+- `$resolutionsByRatio`：分辨率按 16:9 / 21:9 / 32:9 分组，宽高比与分辨率联动
+- `$renderHeights` 多了 2160 / 1800 / 1620 / 1512，并由 `Get-MaxRenderHeight` 按 tile 用量算出上限
+- `$upscalers`（Game / DLSS）+ `$rtxGpu` 检测 + `render_dlss`（两套上采样各记各的渲染高度）
+- `$safeGpuTip` / `safegpu` → `KYTY_COMPUTE_CHAIN=0`
+- `$cmd` / `$powershellCommand` 全路径（issue #47 / #55），`-Set` 改成 `$sets` 累加
+
+合并做法（可复用）：临时 git 仓库 → 提交 1017 上游 → 提交"我们的 1017 版" → 用 `git diff`（带 `index`
+行才有 3-way）生成上游补丁 → `git apply -3`。冲突只有 5 处（`$settings`、`Get-PlayCommand`、DryRun 行、
+界面渲染块、`Read-Form`），逐个手工合。**关键是我们的 `-Set` 累加要并进官方的 `$sets`**，否则
+`KYTY_COMPUTE_CHAIN` 和手柄增益会各发一个 `-Set`，后者覆盖前者。
+
+### 构建
+
+`pgo.hash` 变了（`53BC9E16…` → `ED1A61AF…`）⇒ 官方换了 PGO profile，**全部 727 个对象重编**，约 5 分钟。
+
+### 验证（本次）
+
+- exe：`git = v20261019`，23,198,208 字节；`DualSenseHaptics` / `KYTY_DUALSENSE_HAPTICS` / `SDL_QueueAudio`
+  在、`IAudioClient` = 0（SDL2 后端生效）；`KYTY_COMPUTE_CHAIN` / `KYTY_AUDIO_CUSHION_MS` 也在（官方新功能保留）
+- 与官方 exe 对比 `--help`：**35 行完全一致**，只有文件名不同
+- 启动器：官方 17 个界面行、20 个设置键**一个不缺**，我们的键全部是额外的
+- 界面探针：Resolution / Aspect ratio / Render height / Upscaler 四行都在；宽高比切 21:9 时分辨率换成
+  2560x1080…，渲染高度上限自动降到 1800（21:9 装不下 2160）；非 RTX 机器 Upscaler 置灰
+- 金手指：`verify_cheat.py` 4/4 通过
+- 设置迁移：旧 29 键原样搬过来，`cheatFile` 指向新目录；DryRun 输出
+  `World05=200` / `World02=0` / 喇叭增益 1.2（15 %）/ 震动 1（100 %）

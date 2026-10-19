@@ -1,18 +1,12 @@
 # KytyPS5 add-ons · Demon's Souls
 
-> **This is the fork's add-on guide.** Everything described here lives in this repository under `addons/`
-> (the launcher, the cheats, the DualSense backend); `git diff v20261017` is the whole of it. Download the
-> overlay from the [v20261017-addons release](https://github.com/Sebs886/KytyPS5/releases/tag/v20261017-addons).
-> The engineering notes behind it — how the save format was worked out, every address, every dead end — are
-> in [addons/NOTES.zh-CN.md](addons/NOTES.zh-CN.md) (Chinese).
-
-Three things stacked on top of [KytyPS5](https://github.com/chenxiao07/KytyPS5) (upstream v20261017):
+Three things stacked on top of [KytyPS5](https://github.com/chenxiao07/KytyPS5) (upstream v20261019):
 **cheats**, **per-world tendency** and **DualSense speaker / haptics**. Adaptive triggers need no work —
 upstream already does them.
 
 - Just want to play 👉 [Install](#install)
 - Something is broken 👉 [Troubleshooting](#troubleshooting)
-- Want to know where every address came from 👉 [NOTES.zh-CN.md](addons/NOTES.zh-CN.md) (engineering notes, long, Chinese)
+- Want to know where every address came from 👉 [NOTES.zh-CN.md](NOTES.zh-CN.md) (engineering notes, long, Chinese)
 
 ---
 
@@ -25,22 +19,35 @@ upstream already does them.
 | **Controller speaker / haptics** | Replaces upstream's WASAPI backend with an SDL2 one, so the two audio paths no longer cut each other off, with adjustable volumes | Yes (a built exe ships in the package) |
 | **Adaptive triggers** | Already implemented upstream, verified working, not a line changed | No |
 
+### What upstream added in v20261019 — all of it kept
+
+The package only **adds** rows to the official launcher; none of its own were removed. New upstream:
+
+- **Resolutions follow the picture's shape**: picking 21:9 / 32:9 lists only that shape's sizes (before, an
+  ultrawide choice was stretched back to 16:9).
+- **More render heights**: 2160 / 1800 / 1620 / 1512 for native 4K and DLSS; the list also works out the
+  highest height that fits the chosen shape.
+- **A new Upscaler row**: `Game (PS5)` or `DLSS (PS5 Pro path)`. **NVIDIA RTX only** — greyed out elsewhere.
+- **A new Safe GPU mode**: runs the compute work one step at a time, which stops GPU-hang crashes and blue
+  screens at about 37 % less frame rate. Leave it off if the game does not crash.
+- Smaller ones: the overlay note now mentions F8 in the game, audio gained a few diagnostic environment
+  variables, and unplugging a controller no longer ends the game.
+
 ---
 
 ## Install
 
 ### Option 1: the overlay from the release page (recommended, ~8 MB)
 
-1. Download the full **v20261017** package from upstream and unpack it anywhere:
-   <https://github.com/chenxiao07/KytyPS5/releases/tag/v20261017>
-2. Unpack `KytyPS5-addons-v20261017.zip` **over** that folder (say yes to replacing `kyty_emulator.exe`).
+1. Download the full **v20261019** package from upstream and unpack it anywhere:
+   <https://github.com/chenxiao07/KytyPS5/releases/tag/v20261019>
+2. Unpack `KytyPS5-addons-v20261019.zip` **over** that folder (say yes to replacing `kyty_emulator.exe`).
 3. Double-click **`launcher.cmd`** (not `run.cmd`). The first run asks for the game folder — pick the one
    that contains `eboot.bin`.
 
-### Option 2: build it from this repository
+### Option 2: you already have this folder
 
-Download or `git clone` the repository and double-click `addons/install.cmd`, then pick the emulator
-folder — same result as the overlay.
+Double-click `install.cmd` and pick the emulator folder (you can also drag the folder onto it).
 
 ### What installing does
 
@@ -100,7 +107,7 @@ opens — that is your check that a write actually happened.
 
 The `Cheats` master switch greys the whole block out — nothing is loaded then. Offsets are written for
 **01.007.000 (PPSA01341)**; another game version would patch the wrong addresses. Check a file against
-`eboot.bin` with `addons/cheats/verify_cheat.py` before trusting it.
+`eboot.bin` with `cheats/verify_cheat.py` before trusting it.
 
 ### World tendency: **a box has to be ticked**
 
@@ -164,7 +171,7 @@ and world 4 writes `World02`, as in the table above.
 **No resistance on the triggers?**
 First **actually draw a bow or swing a weapon** in game — toggling "trigger effect" in the menu never produces
 a feel, because the game sends one "both triggers off" when the switch changes and nothing else. If that does
-not help, run `addons/dualsense/probe_trigger.exe`: it drives R2/L2 through four effects without the emulator and
+not help, run `dualsense\probe_trigger.exe`: it drives R2/L2 through four effects without the emulator and
 buzzes the motors first to prove the path. Tool works + game does not = game side; neither works = pad or OS.
 
 **No sound from the controller speaker, or too quiet?**
@@ -182,17 +189,17 @@ Look at the newest `.out.log` under the emulator's `logs\`, then try rolling bac
 ## Following a new upstream release
 
 1. Unpack the new version into a new folder.
-2. Run `addons/install.cmd` and point it at that folder — launcher and cheats work immediately.
-3. If that release has no haptics module, or you want the SDL2 backend, run `addons/dualsense/rebuild.cmd` once.
+2. Run `install.cmd` and point it at that folder — launcher and cheats work immediately.
+3. If that release has no haptics module, or you want the SDL2 backend, run `dualsense\rebuild.cmd` once.
 
-`addons/install.cmd` **never swaps the exe on its own**; it only replaces it when the package holds a build for
+`install.cmd` **never swaps the exe on its own**; it only replaces it when the package holds a build for
 exactly that version, and tells you when it does.
 
 ## Building from source (optional)
 
 ```powershell
-cd addons/dualsense
-.\rebuild.cmd -Target G:\KytyPS5-v20261017 -Version v20261017
+cd dualsense
+.\rebuild.cmd -Target G:\KytyPS5-v20261019 -Version v20261019
 ```
 
 One command does the lot: download that tag's source → apply the patch → build → install into the release
@@ -204,21 +211,20 @@ Needs Visual Studio 2026 (C++ workload, Clang 20+), CMake and Ninja.
 ## Where everything lives
 
 ```
-addons\
+KytyAddons\
+  install.cmd / install.ps1    installer (launcher + cheats, optional exe)
   launcher.ps1                 the launcher (upstream options + the Mods group)
-  install.ps1 / install.cmd    copies the launcher and the cheats onto any release folder
-  cheats\                      the cheat file, its README and verify_cheat.py
-  dualsense\                   SDL2 backend: patches, rebuild.ps1, prebuilt exe, trigger probe
-  NOTES.zh-CN.md               engineering notes (Chinese)
-ADDONS.md                      this file
-ADDONS.zh-CN.md                the same guide in Chinese
-src\libs\dualSenseHaptics.*    the only upstream files this fork changes
+  cheats\                      cheat file, its README and the verifier
+  dualsense\                   backend: patches, build script, prebuilt exe, trigger probe
+  README.md                    this file in Chinese
+  README.en.md                 this file
+  NOTES.zh-CN.md               engineering notes: the reverse engineering, every address, every dead end
 ```
 
 ## Licence and credits
 
 - A fork of [chenxiao07/KytyPS5](https://github.com/chenxiao07/KytyPS5), **GPL-2.0** like upstream.
 - Binaries are distributed together with their source: `addons/` and `src/libs/dualSenseHaptics.*` in the repo.
-- Repository <https://github.com/Sebs886/KytyPS5> · release <https://github.com/Sebs886/KytyPS5/releases/tag/v20261017-addons>
+- Repository <https://github.com/Sebs886/KytyPS5> · release <https://github.com/Sebs886/KytyPS5/releases/tag/v20261019-addons>
 - You need your own copy of the game and its firmware files; nothing here contains game data. Written for
   **Demon's Souls PS5 01.007.000 (PPSA01341)** only.

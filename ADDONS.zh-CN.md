@@ -1,16 +1,11 @@
 # KytyPS5 整合包 · 恶魔之魂
 
-> **本文是这个 fork 的功能说明。** 这里讲的每一样东西都在仓库 `addons/` 下（启动器、金手指、DualSense 后端），
-> 和上游的全部差异就是 `git diff v20261017`。覆盖包在
-> [v20261017-addons 发布页](https://github.com/Sebs886/KytyPS5/releases/tag/v20261017-addons)。
-> 逆向过程与逐地址记录见 [addons/NOTES.zh-CN.md](addons/NOTES.zh-CN.md)。
-
-在 [KytyPS5](https://github.com/chenxiao07/KytyPS5) 模拟器（上游 v20261017）上叠了三样东西：
+在 [KytyPS5](https://github.com/chenxiao07/KytyPS5) 模拟器（上游 v20261019）上叠了三样东西：
 **金手指**、**逐世界倾向**、**DualSense 手柄喇叭与震动**。自适应扳机不用改，原版就能用。
 
 - 只想玩 👉 [安装](#安装)
 - 出了问题 👉 [常见问题](#常见问题)
-- 想知道每个地址是怎么挖出来的 👉 [NOTES.zh-CN.md](addons/NOTES.zh-CN.md)（工程笔记，很长，可以当资料查）
+- 想知道每个地址是怎么挖出来的 👉 [NOTES.zh-CN.md](NOTES.zh-CN.md)（工程笔记，很长，可以当资料查）
 
 ---
 
@@ -23,21 +18,31 @@
 | **手柄喇叭 / 震动** | 把官方那套 WASAPI 后端换成 SDL2，两路声音不会再互相切断，音量可调 | 要（包里有编好的 exe） |
 | **自适应扳机** | 上游本来就实现了，实测正常，一行没改 | 不用 |
 
+### 上游这一版（v20261019）多了什么 —— 全都保留着
+
+整合包只往官方启动器里**加**东西，官方的行一行没删。这一版官方新加的是：
+
+- **分辨率跟着画面比例走**：选 21:9 / 32:9 时，分辨率列表只给这个比例的画面（以前选超宽屏会被拉回 16:9）。
+- **渲染高度多了 2160 / 1800 / 1620 / 1512**：给原生 4K 和 DLSS 用；列表还会按画面比例自动算"装得下的最高值"。
+- **新的 Upscaler 行**：`Game (PS5)` 或 `DLSS (PS5 Pro 路径)`。**只对 NVIDIA RTX 有效**，别的显卡上自动置灰。
+- **新的 Safe GPU mode**：把显卡的计算任务改成串行，避免"显卡挂起"造成的崩溃和蓝屏，代价是帧率约低 37 %。
+  显卡不崩就别开。
+- 顺带的小改动：叠加层提示补了游戏内 F8 切换；音频多了几个诊断环境变量；手柄拔掉不再导致游戏退出。
+
 ---
 
 ## 安装
 
 ### 方式一：用发布页的覆盖包（推荐，约 8 MB）
 
-1. 下载上游完整包 **v20261017**，解压到任意目录：
-   <https://github.com/chenxiao07/KytyPS5/releases/tag/v20261017>
-2. 把 `KytyPS5-addons-v20261017.zip` 解压后**覆盖**到同一个目录（同意替换 `kyty_emulator.exe`）。
+1. 下载上游完整包 **v20261019**，解压到任意目录：
+   <https://github.com/chenxiao07/KytyPS5/releases/tag/v20261019>
+2. 把 `KytyPS5-addons-v20261019.zip` 解压后**覆盖**到同一个目录（同意替换 `kyty_emulator.exe`）。
 3. 双击 **`launcher.cmd`**（不是 `run.cmd`）。第一次启动会让你选游戏目录，选含 `eboot.bin` 的那一层。
 
-### 方式二：用本仓库的源码
+### 方式二：手上有 `G:\KytyAddons` 这份目录
 
-把仓库下载下来（或 `git clone`），双击里面的 `addons/install.cmd`，选模拟器目录
-（也可以把目录直接拖到它上面）就行，效果和覆盖包一样。
+双击 `install.cmd`，选模拟器目录（也可以把目录直接拖到它上面）就行，安装逻辑一样。
 
 ### 装的时候会发生什么
 
@@ -94,7 +99,7 @@ Get-ChildItem *.ps1 | Unblock-File
 | Infinite MP | Dev build flags: RetailBuild off（实验性） |
 
 `Cheats` 总开关不勾就整块置灰，等于一条都不加载。偏移是按 **01.007.000（PPSA01341）** 写的，
-换游戏版本会写错地址 —— 那时候用 `addons/cheats/verify_cheat.py` 对着 `eboot.bin` 复核一遍。
+换游戏版本会写错地址 —— 那时候用 `cheats/verify_cheat.py` 对着 `eboot.bin` 复核一遍。
 
 ### 世界倾向：**要勾才写**
 
@@ -152,7 +157,7 @@ _SaveData\PPSA01341\SAVEDATA0PlayerProfile<n>\USR-DATA
 
 **手柄扳机没有阻力？**
 先在游戏里**真的拉弓蓄力 / 挥刀砍几下** —— 在菜单里开关"扳机效果"是不会有手感的，游戏那时只发一次
-"两侧全关"。还不行就跑 `addons/dualsense/probe_trigger.exe`：它不启动模拟器，直接给 R2/L2 依次发四种效果，
+"两侧全关"。还不行就跑 `dualsense\probe_trigger.exe`：它不启动模拟器，直接给 R2/L2 依次发四种效果，
 先震一下马达证明通路。工具活、游戏死 = 游戏侧；两边都死 = 手柄或系统侧。
 
 **手柄没声音 / 声音太小？**
@@ -173,16 +178,16 @@ _SaveData\PPSA01341\SAVEDATA0PlayerProfile<n>\USR-DATA
 上游发了新版本时：
 
 1. 解压新版本到新目录；
-2. 双击 `addons/install.cmd` 选那个目录（金手指和启动器立刻可用）；
-3. 如果新版本没有手柄模块、或者你想换成整合包这套 SDL2 后端，跑一次 `addons/dualsense/rebuild.cmd`。
+2. 双击 `install.cmd` 选那个目录（金手指和启动器立刻可用）；
+3. 如果新版本没有手柄模块、或者你想换成整合包这套 SDL2 后端，跑一次 `dualsense\rebuild.cmd`。
 
-`addons/install.cmd` **从不擅自改 exe**，它只会在包里有"正好这个版本"的现成 exe 时才替换并提示你。
+`install.cmd` **从不擅自改 exe**，它只会在包里有"正好这个版本"的现成 exe 时才替换并提示你。
 
 ## 自己从源码重编（可选）
 
 ```powershell
-cd addons/dualsense
-.\rebuild.cmd -Target G:\KytyPS5-v20261017 -Version v20261017
+cd dualsense
+.\rebuild.cmd -Target G:\KytyPS5-v20261019 -Version v20261019
 ```
 
 一条命令做完：下载该 tag 的源码 → 打补丁 → 编译 → 装回模拟器目录。
@@ -193,20 +198,19 @@ cd addons/dualsense
 ## 文件都在哪
 
 ```
-addons\
+KytyAddons\
+  install.cmd / install.ps1    安装（复制启动器 + 金手指，可选替换 exe）
   launcher.ps1                 启动器（官方选项 + Mods 分组）
-  install.ps1 / install.cmd    把启动器和金手指复制进任意版本目录
   cheats\                      金手指文件、说明、校验脚本
-  dualsense\                   SDL2 后端：补丁、rebuild.ps1、现成 exe、扳机探针
-  NOTES.zh-CN.md               工程笔记（逆向过程、每个地址）
-ADDONS.md                      英文版功能说明
-ADDONS.zh-CN.md                本文件
-src\libs\dualSenseHaptics.*    本 fork 唯一改动的上游文件
+  dualsense\                   手柄后端：补丁、编译脚本、现成 exe、扳机探针
+  README.md                    本文件（简版，中文）
+  README.en.md                 English version of this file
+  NOTES.zh-CN.md               工程笔记：逆向过程、每个地址、每条弯路
 ```
 
 ## 许可与来源
 
 - 本项目是 [chenxiao07/KytyPS5](https://github.com/chenxiao07/KytyPS5) 的 fork，同样 **GPL-2.0**。
 - 分发二进制时同时提供源码，源码在仓库的 `addons/` 与 `src/libs/dualSenseHaptics.*` 里。
-- 仓库地址：<https://github.com/Sebs886/KytyPS5>　发布页：<https://github.com/Sebs886/KytyPS5/releases/tag/v20261017-addons>
+- 仓库地址：<https://github.com/Sebs886/KytyPS5>　发布页：<https://github.com/Sebs886/KytyPS5/releases/tag/v20261019-addons>
 - 需要自备正版游戏与固件文件，本包不含任何游戏数据。只针对 **恶魔之魂 PS5 版 01.007.000（PPSA01341）**。

@@ -4,13 +4,19 @@
 # they are kept in launcher-settings.json next to this script. -DryRun prints the commands without a window,
 # -ApplyTendency writes the tendency settings into the save and stops.
 #
-# This is the KytyAddons launcher: it is the official launcher of the release it came from (v20261016), with a
+# This is the KytyAddons launcher: it is the official launcher of the release it came from (v20261019), with a
 # "Mods" group added - the cheat file and the mods inside it, the Demon's Souls tendencies, the debug readout and
 # menu, and the DualSense speaker / vibration levels. Everything the official launcher has is kept as it is. The
 # switches that only some releases declare are passed through Test-RunParam, so the same file can be dropped onto
 # a later release without changes.
 $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
+# cmd.exe by its full path: Start-Process with a bare "cmd" opens whatever "cmd" it finds first, and a file of that
+# name without an extension (in the working folder or on the PATH) made Windows ask which app should open it (issue #47).
+$cmd = if ($env:ComSpec -and (Test-Path -LiteralPath $env:ComSpec)) { $env:ComSpec } else { Join-Path ([Environment]::SystemDirectory) 'cmd.exe' }
+# Windows PowerShell by its path too: on a PC whose PATH lacks its folder, cmd.exe did not know "powershell" (issue #55).
+$powershellExe = Join-Path ([Environment]::SystemDirectory) 'WindowsPowerShell\v1.0\powershell.exe'
+$powershellCommand = if (Test-Path -LiteralPath $powershellExe) { "`"$powershellExe`"" } else { 'powershell' }
 $settingsPath = Join-Path $root 'launcher-settings.json'
 # A value the window cannot take must never leave the launcher unopenable: a saved setting outside
 # a control's range threw out of the form build once (the window vanished with no message, and
@@ -27,13 +33,19 @@ $languages = 'Japanese', 'English (United States)', 'French (France)', 'Spanish 
 	'Portuguese (Portugal)', 'Russian', 'Korean', 'Chinese (Traditional)', 'Chinese (Simplified)', 'Finnish', 'Swedish',
 	'Danish', 'Norwegian', 'Polish', 'Portuguese (Brazil)', 'English (United Kingdom)', 'Turkish', 'Spanish (Latin America)',
 	'Arabic', 'French (Canada)', 'Czech', 'Hungarian', 'Greek', 'Romanian', 'Thai', 'Vietnamese', 'Indonesian'
-$resolutions = '1280x720', '1920x1080', '2560x1440', '3840x2160', '2560x1080', '3440x1440', '3840x1600', '5120x2160',
-	'3840x1080', '5120x1440'
+# The window's sizes for each aspect ratio of the 3D (below).
+$resolutionsByRatio = @{
+	'16:9' = '1280x720', '1920x1080', '2560x1440', '3840x2160'
+	'21:9' = '2560x1080', '3440x1440', '3840x1600', '5120x2160'
+	'32:9' = '3840x1080', '5120x1440', '7680x2160' }
 # The height Demon's Souls renders its 3D at (run-windows.ps1 -RenderHeight); its output and UI stay 3840x2160.
-$renderHeights = '1440 (PS5)', '1296', '1152', '1080', '900'
+$renderHeights = '2160 (native 4K)', '1800', '1620', '1512 (PS5 Pro)', '1440 (PS5)', '1296', '1152', '1080', '900'
+# What makes the 3840x2160 image of the 3D (run-windows.ps1 -Upscaler): the game's TAA and stretch (the PS5's), or DLSS in
+# place of Sony's PS5 Pro upscaler on the game's PS5 Pro path (NVIDIA's Streamline runtime, as frame generation).
+$upscalers = 'Game (PS5)', 'DLSS (PS5 Pro path)'
 # The aspect ratio of Demon's Souls' 3D (run-windows.ps1 -Aspect): wider sees more to the sides.
 $ratios = '16:9 (PS5)', '21:9', '32:9'
-# Demon's Souls' own settings for what a frame draws (run-windows.ps1 -Quality): simpler shadows and distant detail;
+# Demon's Souls' own settings for what a frame draws (run-windows.ps1 -Quality): shorter shadows, simpler distant detail;
 # and smaller textures (run-windows.ps1 -TextureReduce: Low 1, Lowest 2; Standard leaves it to the emulator: 1 below
 # 12 GB of video memory, else 0).
 $qualities = 'Standard (PS5)', 'Low', 'Lowest'
@@ -41,6 +53,16 @@ $qualities = 'Standard (PS5)', 'Low', 'Lowest'
 $frameGens = 'Off', '2x', '3x', '4x', '5x', '6x'
 # The emulator's own panel at the top right of the game image (KYTY_FPS_HUD 0, 1, 2).
 $overlays = 'Off', 'Frame rate', 'Detailed'
+# Safe GPU mode (KYTY_COMPUTE_CHAIN=0): Demon's Souls' compute work runs one dispatch after another instead of letting
+# the GPU overlap them. Slower, but it stops the GPU hangs ("device lost", the driver resetting the display) that some
+# PCs have: on an RTX 3080 Laptop with driver 566.07, 3 of 4 runs through 1-1 hung with overlap, none of 3 without it,
+# at 25-48% less frame rate there (13.9-17.7 fps instead of 26.8 at 1-1, 21-22 instead of 28.8 at 2-2).
+$safeGpuTip = "Prevents the crashes and blue screens that come from the graphics card hanging: 'device lost', the screen going`n" +
+	"black while the graphics driver restarts (a TDR), or a VIDEO_TDR_FAILURE blue screen. The emulator then runs Demon's Souls'`n" +
+	"compute work one step after another instead of letting the graphics card overlap the steps. The frame rate is about 37%`n" +
+	"lower (on a laptop RTX 3080 at Boletaria: 17 fps instead of 27). It does not help MEMORY_MANAGEMENT blue screens, which`n" +
+	"come from the RAM being full (see the README). Leave it off if the game runs without such crashes; a current graphics`n" +
+	"driver can help too."
 
 # The switches run-windows.ps1 declares in this folder. A release that does not declare one ends the run on it, so
 # the optional switches are passed only when this version has them: this launcher is copied onto a later release as
@@ -60,6 +82,9 @@ if ($runText -match "(?m)Contains\('KYTY_GAME_CONVARS'\)[^\r\n]*\{[^\r\n]*'KYTY_
 $settings = [ordered]@{ game = ''; resolution = '2560x1440'; fullscreen = $false; aspect = $true; language = 1;
 	redzone = $true; ecores = $false; fps120 = $false; render = 1440; ratio = '16:9'; quality = 'standard';
 	vsync = $false; hdr = $false; framegen = 0; hud = 0; streamline = '';
+	# v20261019: the safe GPU mode (KYTY_COMPUTE_CHAIN=0), the DLSS upscaler and the render height it keeps
+	# for itself. A settings file that predates them simply has no such keys and keeps the defaults here.
+	safegpu = $false; upscaler = ''; render_dlss = 1080;
 	cheats = $false; cheatFile = ''; modStates = @{};
 	# tendencyWorlds starts EMPTY on purpose: an empty list is what says "this settings file never held
 	# per-world values", which is the case that fills the seven boxes from the save instead. A list of
@@ -500,7 +525,12 @@ function Resolve-Streamline {
 	return $null
 }
 $streamline = Resolve-Streamline
-$frameGenAvailable = [bool]$streamline
+# DLSS (the upscaler and frame generation) needs an NVIDIA RTX graphics card: with none (AMD, Intel, GeForce GTX) both
+# rows stay off and the game's own TAA makes the picture, at the render height the game's TAA keeps.
+$rtxGpu = try {
+	[bool](Get-CimInstance Win32_VideoController | Where-Object { $_.Name -match 'NVIDIA' -and $_.Name -match '\bRTX\b' })
+} catch { $false }
+$frameGenAvailable = [bool]$streamline -and $rtxGpu
 
 function Get-PlayCommand {
 	$size = $settings.resolution -split 'x'
@@ -513,14 +543,15 @@ function Get-PlayCommand {
 	if ($settings.vsync -and (Test-RunParam 'PresentMode')) { $arguments += @('-PresentMode', 'Fifo') }
 	# HDR10 output when Windows HDR is on for the display; SDR otherwise.
 	if ($settings.hdr -and (Test-RunParam 'Hdr')) { $arguments += '-Hdr' }
-	if ((Test-RunParam 'RenderHeight') -and [int]$settings.render -gt 0 -and [int]$settings.render -ne 1440) {
-		$arguments += @('-RenderHeight', [int]$settings.render)
-	}
+	$dlss = $frameGenAvailable -and $settings.upscaler -eq 'dlss'
+	# The upscaler's own render height (with DLSS always passed: the PS5 Pro path's own height is 1512).
+	$height = if ($dlss) { [int]$settings.render_dlss } else { [int]$settings.render }
+	if ((Test-RunParam 'RenderHeight') -and $height -gt 0 -and ($height -ne 1440 -or $dlss)) { $arguments += @('-RenderHeight', $height) }
 	if ($settings.ratio -in '21:9', '32:9' -and (Test-RunParam 'Aspect')) { $arguments += @('-Aspect', $settings.ratio) }
 	if ($settings.quality -in 'low', 'lowest' -and (Test-RunParam 'Quality')) {
 		$arguments += @('-Quality', $settings.quality)
-		# v20261017 shrinks the large textures with the quality preset (Low: their largest level left out,
-		# Lowest: the two largest). v20261016 and older have no -TextureReduce and leave that to the
+		# v20261017 and newer shrink the large textures with the quality preset (Low: their largest level left
+		# out, Lowest: the two largest). v20261016 and older have no -TextureReduce and leave that to the
 		# emulator's own video-memory rule, so the switch is passed only where run-windows.ps1 declares it.
 		if (Test-RunParam 'TextureReduce') {
 			$textureReduce = if ($settings.quality -eq 'lowest') { 2 } else { 1 }
@@ -529,15 +560,18 @@ function Get-PlayCommand {
 	}
 	if ($frameGenAvailable -and [int]$settings.framegen -ge 2 -and (Test-RunParam 'FrameGen')) {
 		$arguments += @('-FrameGen', ([int]$settings.framegen - 1))
-		if (Test-RunParam 'StreamlineDir') { $arguments += @('-StreamlineDir', "`"$streamline`"") }
+	}
+	if ($dlss -and (Test-RunParam 'Upscaler')) { $arguments += @('-Upscaler', 'dlss') }
+	if ($frameGenAvailable -and ([int]$settings.framegen -ge 2 -or $dlss) -and (Test-RunParam 'StreamlineDir')) {
+		$arguments += @('-StreamlineDir', "`"$streamline`"")
 	}
 	# Cheats: run-windows.ps1 -Patch loads the file as kyty_emulator.exe --game-patch <json>
 	# (an etaHEN/GoldHEN "mods" file); the emulator patches the game when it starts.
 	if ($settings.cheats -and $settings.cheatFile -and (Test-RunParam 'Patch')) { $arguments += @('-Patch', "`"$(Get-SessionCheats)`"") }
 	if ($settings.game) { $arguments += @('-Game', "`"$($settings.game)`"") }
-	# The emulator's panel (KYTY_FPS_HUD), the readout, the debug menu and the controller volume all
-	# go through run-windows.ps1's own -Set switch (KEY=VALUE, several pairs separated by commas). An
-	# environment variable set here
+	# The emulator's panel (KYTY_FPS_HUD), the safe GPU mode, the readout, the debug menu and the controller
+	# volume all go through run-windows.ps1's own -Set switch (KEY=VALUE, several pairs separated by commas).
+	# An environment variable set here
 	# would NOT arrive: run-windows.ps1 builds the environment it gives kyty_emulator.exe from
 	# launch.json, then overwrites the two it looks after itself -- this file's KYTY_GAME_CONVARS
 	# would be replaced by the release's own default, which is exactly what happened before the
@@ -547,6 +581,8 @@ function Get-PlayCommand {
 	if (Test-RunParam 'Set') {
 		$pairs = @()
 		if ([int]$settings.hud -ge 1) { $pairs += "KYTY_FPS_HUD=$([Math]::Min([int]$settings.hud, 2))" }
+		# Safe GPU mode: no overlapping compute dispatches ($safeGpuTip).
+		if ($settings.safegpu) { $pairs += 'KYTY_COMPUTE_CHAIN=0' }
 		$convars = @(Get-TendencyConvars)
 		if ($convars.Count -gt 0) {
 			$pairs += "KYTY_GAME_CONVARS=$(@(@($releaseGameConvars) + $convars | Where-Object { $_ }) -join ';')"
@@ -555,14 +591,14 @@ function Get-PlayCommand {
 		if ($pairs.Count -gt 0) { $arguments += @('-Set', "`"$($pairs -join ',')`"") }
 	}
 	# The console stays for the live log; after a crash it waits for a key.
-	return 'powershell ' + ($arguments -join ' ') + ' & if !errorlevel! neq 0 pause'
+	return "$powershellCommand " + ($arguments -join ' ') + ' & if !errorlevel! neq 0 pause'
 }
 function Get-PrecompileCommand([string]$switch = '') {
 	$arguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$root\precompile-windows.ps1`"")
 	if ($switch) { $arguments += $switch }
 	if ($settings.ecores -and $efficiencyMask -ne 0) { $arguments += @('-Affinity', $efficiencyMask) }
 	if ($settings.game) { $arguments += @('-Game', "`"$($settings.game)`"") }
-	return 'powershell ' + ($arguments -join ' ') + ' & pause'
+	return "$powershellCommand " + ($arguments -join ' ') + ' & pause'
 }
 function Save-Settings { $settings | ConvertTo-Json | Set-Content $settingsPath -Encoding UTF8 }
 if ($ApplyTendency) {
@@ -585,9 +621,9 @@ if ($DryRun) {
 	"precompile: cmd /s /c `"$(Get-PrecompileCommand)`""
 	"hints:      cmd /s /c `"$(Get-PrecompileCommand '-ExportHints')`""
 	"efficiency cores: 0x{0:X}" -f $efficiencyMask
-	"frame generation: $(if ($frameGenAvailable) { "NVIDIA's Streamline runtime in $streamline" } else { "no NVIDIA-signed Streamline runtime (settings: '$($settings.streamline)')" })"
+	"frame generation: $(if ($frameGenAvailable) { "NVIDIA's Streamline runtime in $streamline" } elseif (!$rtxGpu) { 'no NVIDIA RTX graphics card (DLSS off)' } else { "no NVIDIA-signed Streamline runtime (settings: '$($settings.streamline)')" })"
 	$convars = @(Get-TendencyConvars)
-	"game convars: " + $(if ($convars.Count -gt 0) { "$(@(@($releaseGameConvars) + $convars | Where-Object { $_ }) -join ';')" } else { "(none; the release's own default is '$releaseGameConvars')" })
+	"convars:   " + $(if ($convars.Count -gt 0) { "$(@(@($releaseGameConvars) + $convars | Where-Object { $_ }) -join ';')" } else { "(none; the release's own default is '$releaseGameConvars')" })
 	$volume = @(Get-ControllerVolume)
 	"controller volume: " + $(if ($volume.Count -gt 0) { "$($volume -join ', ')" } else { '(the package default: the pad speaker at gain 8, the actuators at gain 1)' })
 	"tendency save: $(Get-TendencyStatus)"
@@ -663,12 +699,116 @@ $browseZar.Add_Click({
 $game.Add_TextChanged({ Update-Title })
 Update-Title
 
-$resolution = New-Object System.Windows.Forms.ComboBox -Property @{ DropDownStyle = 'DropDownList'; Width = 160 }
-$resolution.Items.AddRange($resolutions)
-$resolution.SelectedItem = if ($resolutions -contains $settings.resolution) { $settings.resolution } else { '2560x1440' }
+# The picture's size, shape and detail, side by side: the aspect ratio offers the resolutions of its shape (a 21:9
+# picture in a 3840x2160 window was stretched back to 16:9) and the render heights whose 3D the game holds (no larger
+# than its own 3840x2160 in GPU tiles: 21:9 at 2160 ended it at start-up, 1864 drew it red; src/loader/demonsSoulsRenderSize.h).
+$ratio = New-Object System.Windows.Forms.ComboBox -Property @{ DropDownStyle = 'DropDownList'; Width = 205 }
+$ratio.Items.AddRange($ratios)
+$ratio.SelectedItem = ($ratios | Where-Object { ($_ -split ' ')[0] -eq [string]$settings.ratio } | Select-Object -First 1)
+if ($ratio.SelectedIndex -lt 0) { $ratio.SelectedIndex = 0 }
+$ratioNote = New-Object System.Windows.Forms.Label -Property @{ AutoSize = $true; ForeColor = 'Gray'; Margin = '6,6,0,0'
+	Text = '21:9 and 32:9 show more to the sides; the HUD keeps its shape, menus and movies are stretched' }
+function Get-Ratio { ([string]$ratio.SelectedItem -split ' ')[0] }
+function Get-RatioAspect { switch (Get-Ratio) { '21:9' { 64.0 / 27.0 } '32:9' { 32.0 / 9.0 } default { 16.0 / 9.0 } } }
+$resolution = New-Object System.Windows.Forms.ComboBox -Property @{ DropDownStyle = 'DropDownList'; Width = 205 }
+# The ratio's resolutions; `wanted` kept when it is one of them, else the one nearest its height.
+function Update-Resolutions([string]$wanted) {
+	$list = $resolutionsByRatio[(Get-Ratio)]
+	$resolution.Items.Clear()
+	$resolution.Items.AddRange($list)
+	$height = [int](($wanted -split 'x')[1])
+	$resolution.SelectedItem = if ($list -contains $wanted) { $wanted } else {
+		$list | Sort-Object { [Math]::Abs([int](($_ -split 'x')[1]) - $height) } | Select-Object -First 1
+	}
+}
+Update-Resolutions $settings.resolution
+$render = New-Object System.Windows.Forms.ComboBox -Property @{ DropDownStyle = 'DropDownList'; Width = 205 }
+# The highest render height whose 3D at the ratio fits the game's render target memory, made for 3840x2160: no more of
+# the GPU's 64 KiB tiles (256x128, 128x128, 128x64, 64x64 pixels) than 3840x2160 (the emulator's FitsRenderTargets).
+function Get-MaxRenderHeight {
+	$aspectValue = Get-RatioAspect
+	for ($h = 2160; $h -ge 720; $h -= 8) {
+		$w = [Math]::Floor($h * $aspectValue / 8.0 + 0.5) * 8
+		$fits = $true
+		foreach ($tile in @(@(256, 128), @(128, 128), @(128, 64), @(64, 64))) {
+			$tiles = [Math]::Ceiling($w / $tile[0]) * [Math]::Ceiling($h / $tile[1])
+			if ($tiles -gt [Math]::Ceiling(3840 / $tile[0]) * [Math]::Ceiling(2160 / $tile[1])) { $fits = $false }
+		}
+		if ($fits) { return $h }
+	}
+	720
+}
+# Each upscaler keeps its own render height (settings render, render_dlss): the row shows the height last chosen for the
+# chosen upscaler ($renderWanted) among those the ratio allows; one above them shows as the highest allowed (and comes
+# back with a ratio that allows it), one not in the list as the upscaler's default.
+function Get-RenderFallback { if ($script:renderForDlss) { 1080 } else { 1440 } }
+function Select-RenderHeight {
+	$most = Get-MaxRenderHeight
+	$allowed = @($renderHeights | Where-Object { [int](($_ -split ' ')[0]) -le $most })
+	$script:fillingRender = $true
+	try {
+		$render.Items.Clear()
+		$render.Items.AddRange($allowed)
+		if ($script:renderWanted -gt $most) { $render.SelectedIndex = 0; return }
+		foreach ($wanted in @($script:renderWanted, (Get-RenderFallback))) {
+			$render.SelectedItem = ($allowed | Where-Object { ($_ -split ' ')[0] -eq [string]$wanted } | Select-Object -First 1)
+			if ($render.SelectedIndex -ge 0) { return }
+		}
+		$render.SelectedIndex = 0
+	} finally {
+		$script:fillingRender = $false
+	}
+}
+$renderNote = New-Object System.Windows.Forms.Label -Property @{ AutoSize = $true; ForeColor = 'Gray'; Margin = '6,6,0,0' }
+function Update-RenderNote {
+	$h = [int](([string]$render.SelectedItem -split ' ')[0])
+	$w = [Math]::Floor($h * (Get-RatioAspect) / 8.0 + 0.5) * 8
+	$renderNote.Text = "Demon's Souls' 3D at ${w}x${h}; higher = sharper, needs more GPU"
+}
+$render.Add_SelectedIndexChanged({
+	if (!$script:fillingRender) { $script:renderWanted = [int](([string]$render.SelectedItem -split ' ')[0]) }
+	Update-RenderNote
+})
+$renderForDlss = $frameGenAvailable -and $settings.upscaler -eq 'dlss'
+$renderWanted = [int]$(if ($renderForDlss) { $settings.render_dlss } else { $settings.render })
+Select-RenderHeight
+Update-RenderNote
+$ratio.Add_SelectedIndexChanged({
+	Update-Resolutions ([string]$resolution.SelectedItem)
+	Select-RenderHeight
+	Update-RenderNote
+})
+$upscaler = New-Object System.Windows.Forms.ComboBox -Property @{ DropDownStyle = 'DropDownList'; Width = 205; Enabled = $frameGenAvailable }
+$upscaler.Items.AddRange($upscalers)
+$upscaler.SelectedIndex = if ($frameGenAvailable -and $settings.upscaler -eq 'dlss') { 1 } else { 0 }
+$upscalerNote = New-Object System.Windows.Forms.Label -Property @{ AutoSize = $true; ForeColor = 'Gray'; Margin = '6,6,0,0' }
+function Update-UpscalerNote {
+	$upscalerNote.Text = if ($frameGenAvailable) { 'DLSS: NVIDIA RTX; 1440 = Quality, 1080 = Performance, 2160 = DLAA' }
+		elseif (!$rtxGpu) { 'DLSS needs an NVIDIA RTX graphics card: here the game''s own TAA' }
+		else { 'needs NVIDIA''s Streamline SDK (choose its folder under Frame generation)' }
+}
+Update-UpscalerNote
+(New-Object System.Windows.Forms.ToolTip -Property @{ AutoPopDelay = 30000 }).SetToolTip($upscaler,
+	"Game: the PS5's performance mode, its 3D anti-aliased by the game's TAA at the render height and stretched to 4K.`n" +
+	"DLSS: the game's own PS5 Pro mode, Sony's upscaler (PSSR) replaced by NVIDIA DLSS: the 3D at the render height (2688x1512`n" +
+	"at 1512, the PS5 Pro's; 1080 at least) made a 3840x2160 image the game finishes at 4K (bloom, depth of field, the HUD).`n" +
+	"Sharper than the stretch, at some GPU cost. The in-game Cinematic mode stays native 4K without DLSS.`n" +
+	"Each upscaler keeps its own render height. DLSS starts at 1080: on an RTX 5090 about the frame rate of the game's TAA`n" +
+	"at 1440, with a sharper 4K image.")
+$upscaler.Add_SelectedIndexChanged({
+	# The height chosen goes back to the upscaler it was for; the newly chosen one's is shown.
+	if ($script:renderForDlss) { $settings.render_dlss = $script:renderWanted } else { $settings.render = $script:renderWanted }
+	$script:renderForDlss = $upscaler.SelectedIndex -eq 1
+	$script:renderWanted = [int]$(if ($script:renderForDlss) { $settings.render_dlss } else { $settings.render })
+	Select-RenderHeight
+	Update-RenderNote
+})
 Add-Row 'Resolution' @($resolution)
+Add-Row 'Aspect ratio' @($ratio, $ratioNote)
+Add-Row 'Render height' @($render, $renderNote)
+Add-Row 'Upscaler' @($upscaler, $upscalerNote)
 $fullscreen = New-Object System.Windows.Forms.CheckBox -Property @{ Text = 'Fullscreen'; AutoSize = $true; Checked = [bool]$settings.fullscreen }
-$aspect = New-Object System.Windows.Forms.CheckBox -Property @{ Text = 'Keep 16:9 (black bars)'; AutoSize = $true; Checked = [bool]$settings.aspect }
+$aspect = New-Object System.Windows.Forms.CheckBox -Property @{ Text = 'Keep the aspect ratio (black bars)'; AutoSize = $true; Checked = [bool]$settings.aspect }
 $aspect.Enabled = $fullscreen.Checked
 $fullscreen.Add_CheckedChanged({ $aspect.Enabled = $fullscreen.Checked })
 Add-Row '' @($fullscreen, $aspect)
@@ -908,26 +1048,17 @@ if (!(Test-RunParam 'Set')) {
 # The Mods group ends here; the video settings that follow are rows of the main grid again.
 $rowTable = $grid
 
-$render = New-Object System.Windows.Forms.ComboBox -Property @{ DropDownStyle = 'DropDownList'; Width = 160 }
-$render.Items.AddRange($renderHeights)
-$render.SelectedItem = ($renderHeights | Where-Object { ($_ -split ' ')[0] -eq [string][int]$settings.render } | Select-Object -First 1)
-if ($render.SelectedIndex -lt 0) { $render.SelectedIndex = 0 }
-$renderNote = New-Object System.Windows.Forms.Label -Property @{ Text = 'Demon''s Souls 3D; lower = faster, less sharp'; AutoSize = $true; ForeColor = 'Gray'; Margin = '6,6,0,0' }
-if (Test-RunParam 'RenderHeight') { Add-Row 'Render height' @($render, $renderNote) }
-$ratio = New-Object System.Windows.Forms.ComboBox -Property @{ DropDownStyle = 'DropDownList'; Width = 160 }
-$ratio.Items.AddRange($ratios)
-$ratio.SelectedItem = ($ratios | Where-Object { ($_ -split ' ')[0] -eq [string]$settings.ratio } | Select-Object -First 1)
-if ($ratio.SelectedIndex -lt 0) { $ratio.SelectedIndex = 0 }
-$ratioNote = New-Object System.Windows.Forms.Label -Property @{ AutoSize = $true; ForeColor = 'Gray'; Margin = '6,6,0,0'
-	Text = 'the 3D wider (more to the sides); the HUD keeps its shape, menus are stretched, movies stay 16:9' }
-Add-Row 'Aspect ratio' @($ratio, $ratioNote)
+# Safe GPU mode (v20261019): KYTY_COMPUTE_CHAIN=0, no overlapping compute dispatches ($safeGpuTip).
+$safeGpu = New-Object System.Windows.Forms.CheckBox -Property @{ Text = 'Safe GPU mode: prevents GPU-hang crashes and blue screens, but the frame rate is about 37% lower'; AutoSize = $true; Checked = [bool]$settings.safegpu }
+(New-Object System.Windows.Forms.ToolTip -Property @{ AutoPopDelay = 30000 }).SetToolTip($safeGpu, $safeGpuTip)
+Add-Row '' @($safeGpu)
 $quality = New-Object System.Windows.Forms.ComboBox -Property @{ DropDownStyle = 'DropDownList'; Width = 205 }
 $quality.Items.AddRange($qualities)
 $quality.SelectedItem = ($qualities | Where-Object { ($_ -split ' ')[0] -eq [string]$settings.quality } | Select-Object -First 1)
 if ($quality.SelectedIndex -lt 0) { $quality.SelectedIndex = 0 }
-$qualityNote = New-Object System.Windows.Forms.Label -Property @{ Text = 'simpler shadows and detail, smaller textures; faster on weaker PCs'; AutoSize = $true; ForeColor = 'Gray'; Margin = '6,6,0,0' }
+$qualityNote = New-Object System.Windows.Forms.Label -Property @{ Text = 'shorter shadows, simpler detail, smaller textures; faster on weaker PCs'; AutoSize = $true; ForeColor = 'Gray'; Margin = '6,6,0,0' }
 $qualityTips = New-Object System.Windows.Forms.ToolTip
-$qualityTips.SetToolTip($quality, "Standard: the PS5's picture. With less than 12 GB of video memory, large textures leave out their largest level`n(half the size per side) so that they fit.`nLow: simpler shadows and distant detail, textures half the size per side.`nLowest: simpler still, textures a quarter the size per side.")
+$qualityTips.SetToolTip($quality, "Standard: the PS5's picture. With less than 12 GB of video memory, large textures leave out their largest level`n(half the size per side) so that they fit.`nLow: shorter sun shadows, simpler distant detail, textures half the size per side.`nLowest: shorter still, no ambient shadowing or torch shadows, textures a quarter the size per side.")
 Add-Row 'Graphics' @($quality, $qualityNote)
 $frameGen = New-Object System.Windows.Forms.ComboBox -Property @{ DropDownStyle = 'DropDownList'; Width = 160; Enabled = $frameGenAvailable }
 $frameGen.Items.AddRange($frameGens)
@@ -936,8 +1067,9 @@ if ($frameGen.SelectedIndex -lt 0) { $frameGen.SelectedIndex = 0 }
 $frameGenFolder = New-Object System.Windows.Forms.Button -Property @{ Text = 'Streamline...'; AutoSize = $true }
 $frameGenNote = New-Object System.Windows.Forms.Label -Property @{ AutoSize = $true; ForeColor = 'Gray'; Margin = '6,6,0,0' }
 function Update-FrameGenNote {
-	$frameGenNote.Text = if ($frameGenAvailable) { 'DLSS; NVIDIA RTX 40 or newer (3x and up: RTX 50)' } else {
-		'needs NVIDIA''s Streamline SDK: download it, then choose its folder' }
+	$frameGenNote.Text = if ($frameGenAvailable) { 'DLSS; NVIDIA RTX 40 or newer (3x and up: RTX 50)' }
+		elseif (!$rtxGpu) { 'DLSS: needs an NVIDIA RTX 40 or newer graphics card' }
+		else { 'needs NVIDIA''s Streamline SDK: download it, then choose its folder' }
 }
 Update-FrameGenNote
 $frameGenTips = New-Object System.Windows.Forms.ToolTip
@@ -955,16 +1087,19 @@ $frameGenFolder.Add_Click({
 	}
 	$settings.streamline = $dialog.SelectedPath
 	$script:streamline = $found
-	$script:frameGenAvailable = $true
-	$frameGen.Enabled = $true
+	# (Without an NVIDIA RTX graphics card the folder is kept, the rows stay off.)
+	$script:frameGenAvailable = $rtxGpu
+	$frameGen.Enabled = $rtxGpu
+	$upscaler.Enabled = $rtxGpu
 	Update-FrameGenNote
+	Update-UpscalerNote
 })
 Add-Row 'Frame generation' @($frameGen, $frameGenFolder, $frameGenNote)
 $hud = New-Object System.Windows.Forms.ComboBox -Property @{ DropDownStyle = 'DropDownList'; Width = 160 }
 $hud.Items.AddRange($overlays)
 # (An older launcher saved true for the frame rate.)
 $hud.SelectedIndex = [Math]::Max(0, [Math]::Min($overlays.Count - 1, [int]$settings.hud))
-$hudNote = New-Object System.Windows.Forms.Label -Property @{ Text = 'top right: frame rate and frame times; detailed: GPU, CPU, memory'; AutoSize = $true; ForeColor = 'Gray'; Margin = '6,6,0,0' }
+$hudNote = New-Object System.Windows.Forms.Label -Property @{ Text = 'top right: frame rate and frame times; detailed: GPU, CPU, memory. F8 in the game switches it'; AutoSize = $true; ForeColor = 'Gray'; Margin = '6,6,0,0' }
 Add-Row 'Overlay' @($hud, $hudNote)
 $ecores = New-Object System.Windows.Forms.CheckBox -Property @{ Text = 'Precompile on the efficiency cores only (slower, the PC stays responsive)'; AutoSize = $true
 	Checked = ([bool]$settings.ecores -and $efficiencyMask -ne 0); Enabled = ($efficiencyMask -ne 0) }
@@ -997,12 +1132,19 @@ function Read-Form {
 	$settings.fps120     = $fps120.Checked
 	$settings.vsync      = $vsync.Checked
 	if ($hdr) { $settings.hdr = $hdr.Checked }
-	if (Test-RunParam 'RenderHeight') { $settings.render = [int](([string]$render.SelectedItem -split ' ')[0]) }
+	$settings.safegpu    = $safeGpu.Checked
+	# Each upscaler keeps its own render height (render for the game's TAA, render_dlss for DLSS); a
+	# release without -RenderHeight has no such row and keeps whatever it was saved with.
+	if (Test-RunParam 'RenderHeight') {
+		$height = [int](([string]$render.SelectedItem -split ' ')[0])
+		if ($renderForDlss) { $settings.render_dlss = $height } else { $settings.render = $height }
+	}
 	$settings.ratio      = ([string]$ratio.SelectedItem -split ' ')[0]
 	$settings.quality    = ([string]$quality.SelectedItem -split ' ')[0].ToLowerInvariant()
 	# (Kept as it was where the DLLs are missing.)
 	if ($frameGenAvailable) { $settings.framegen = if ($frameGen.SelectedIndex -gt 0) { $frameGen.SelectedIndex + 1 } else { 0 } }
 	$settings.hud        = $hud.SelectedIndex
+	if ($frameGenAvailable) { $settings.upscaler = if ($upscaler.SelectedIndex -eq 1) { 'dlss' } else { '' } }
 	$settings.ecores     = $ecores.Checked
 	# Tendency is stored as the plain float the game uses, on its own -200 .. +200 scale with 0 as
 	# neutral; the number boxes are integer, so what is written back is a whole number too. The world
@@ -1046,16 +1188,16 @@ $play.Add_Click({
 	if ($asked -and -not $script:tendencyWriteOk) {
 		[System.Windows.Forms.MessageBox]::Show("The tendency settings were not applied.`r`n`r`n$result", 'KytyPS5 launcher') | Out-Null
 	}
-	Start-Process cmd -ArgumentList "/v:on /s /c `"$(Get-PlayCommand)`"" -WorkingDirectory $root
+	Start-Process $cmd -ArgumentList "/v:on /s /c `"$(Get-PlayCommand)`"" -WorkingDirectory $root
 	$form.Close()
 })
 $precompile.Add_Click({
 	Read-Form
-	Start-Process cmd -ArgumentList "/s /c `"$(Get-PrecompileCommand)`"" -WorkingDirectory $root
+	Start-Process $cmd -ArgumentList "/s /c `"$(Get-PrecompileCommand)`"" -WorkingDirectory $root
 })
 $share.Add_Click({
 	Read-Form
-	Start-Process cmd -ArgumentList "/s /c `"$(Get-PrecompileCommand '-ExportHints')`"" -WorkingDirectory $root
+	Start-Process $cmd -ArgumentList "/s /c `"$(Get-PrecompileCommand '-ExportHints')`"" -WorkingDirectory $root
 })
 $logs.Add_Click({
 	$folder = if (Test-Path "$root\_Build") { "$root\_Build\run-logs" } else { "$root\logs" }
